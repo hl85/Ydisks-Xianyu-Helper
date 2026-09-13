@@ -160,6 +160,10 @@ func extractMessageID(decrypted map[string]any) string {
 	if id := strings.TrimSpace(toString(m1["3"])); id != "" && id != "<nil>" {
 		return id
 	}
+	// platformID 在协议字段变体下寻找消息模型返回的 PNM，避免实时最新消息退回关联 UUID。
+	if platformID := findPNMMessageID(decrypted); platformID != "" {
+		return platformID
+	}
 	// m10、ok 保存消息展示扩展及其是否存在，用于兼容旧消息关联 ID。
 	m10, ok := m1["10"].(map[string]any)
 	if !ok {
@@ -190,6 +194,35 @@ func extractMessageID(decrypted map[string]any) string {
 		}
 	}
 	return findMessageID(decrypted)
+}
+
+// findPNMMessageID 递归寻找闲鱼消息模型使用的 PNM 标识。
+func findPNMMessageID(value any) string {
+	switch current := value.(type) {
+	case map[string]any:
+		for _, child := range current {
+			if id := findPNMMessageID(child); id != "" {
+				return id
+			}
+		}
+	case []any:
+		for _, child := range current {
+			if id := findPNMMessageID(child); id != "" {
+				return id
+			}
+		}
+	case string:
+		id := strings.TrimSpace(current)
+		if strings.HasSuffix(id, ".PNM") {
+			return id
+		}
+		// decoded 兼容平台把消息模型嵌在 JSON 字符串中的实时帧格式。
+		var decoded any
+		if json.Unmarshal([]byte(current), &decoded) == nil {
+			return findPNMMessageID(decoded)
+		}
+	}
+	return ""
 }
 
 // findMessageID 递归解析兼容消息信封中可能存在的关联消息 ID。

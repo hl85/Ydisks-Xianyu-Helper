@@ -482,6 +482,14 @@ func TestExtractMessageID(t *testing.T) {
 	got := extractMessageID(map[string]any{"1": map[string]any{}}); got != "" {
 		t.Errorf("无 ID: got %q", got)
 	}
+	if // got 用于本次流程后续判断的got
+	got := extractMessageID(map[string]any{"1": map[string]any{"10": map[string]any{"extJson": `{"messageId":"legacy-uuid"}`, "nested": map[string]any{"messageId": "4269999999999.PNM"}}}}); got != "4269999999999.PNM" {
+		t.Errorf("嵌套 PNM 优先: got %q", got)
+	}
+	if // got 用于本次流程后续判断的got
+	got := extractMessageID(map[string]any{"1": map[string]any{"10": map[string]any{"payload": `{"messageId":"4270000000000.PNM"}`}}}); got != "4270000000000.PNM" {
+		t.Errorf("JSON 字符串中的 PNM: got %q", got)
+	}
 }
 
 // TestMessageContentType extJson 优先，其次 m6.3.4，再其次 m6.3.5 内嵌 JSON。

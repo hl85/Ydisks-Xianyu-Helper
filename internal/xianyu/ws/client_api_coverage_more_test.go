@@ -141,7 +141,7 @@ func TestListAPICoversMissingBodyReasonAndCanceledRequest(t *testing.T) {
 	// readConnection 保存已读上报场景的连接。
 	readConnection, _ := newAPIResponseConn(t, map[string]any{}, http.StatusBadRequest)
 	// readErr 保存已读上报请求错误。
-	if readErr := readConnection.MarkChatRead(context.Background(), "cid", []map[string]any{{"messageId": "m1"}, {"messageId": " "}, {"messageId": nil}}); readErr != nil {
+	if readErr := readConnection.MarkChatRead(context.Background(), "cid", []map[string]any{{"messageId": "4263141580162.PNM"}, {"messageId": " "}, {"messageId": nil}, {"messageId": "legacy-uuid"}}); readErr != nil {
 		t.Fatalf("mark chat read=%v", readErr)
 	}
 }

@@ -195,27 +195,38 @@ func (c *Conn) SendText(ctx context.Context, myID, cid, toID, text string) error
 // ctx 控制远端请求生命周期；cid 仅用于本地可观测日志；messageIDs 为待上报消息对象。
 // 返回值仅报告远端调用失败，平台拒绝会被记录为告警以保留既有调用兼容性。
 func (c *Conn) MarkChatRead(ctx context.Context, cid string, messageIDs []map[string]any) error {
-	// ids 是剔除空值后的 PNM ID 列表，按平台 MessageStatusService 的参数格式发送。
+	// ids 是剔除空值后的平台消息 ID 列表，按 MessageStatusService 的参数格式发送。
 	ids := make([]string, 0, len(messageIDs))
 	// item 为调用方传入的一条待读消息对象，可能缺少平台消息 ID。
 	for _, item := range messageIDs {
 		// id 是当前对象中可上报的非空 PNM 消息 ID。
 		if id := strings.TrimSpace(fmt.Sprint(item["messageId"])); id != "" && id != "<nil>" {
+			// 闲鱼已读接口只接受消息模型返回的 PNM 标识；关联 UUID 会导致整批请求被平台拒绝。
+			if !strings.HasSuffix(id, ".PNM") {
+				continue
+			}
 			ids = append(ids, id)
 		}
 	}
 	c.logger.Debug("准备上报闲鱼已读", "cid", cid, "message_count", len(ids), "message_ids", ids)
-	// response 保存平台响应；err 表示请求或传输失败。服务只接受一个 string 列表参数。
-	response, err := c.request(ctx, "/r/MessageStatus/read", map[string]any{}, []any{ids}, regResponseTimeout)
-	if err == nil {
+	if len(ids) == 0 {
+		return nil
+	}
+	// 每条消息单独请求，严格匹配官方页面的 body:[[messageId]] 形式，避免批量请求只推进到部分消息。
+	for _, id := range ids {
+		// response 保存当前单条平台响应；err 表示请求或传输失败。
+		response, err := c.request(ctx, "/r/MessageStatus/read", map[string]any{}, []any{[]string{id}}, regResponseTimeout)
+		if err != nil {
+			return err
+		}
 		// code 是平台业务状态码；ok 表示响应中的状态码可被规范解析。
 		if code, ok := responseCode(response["code"]); ok && code >= 400 {
-			c.logger.Warn("闲鱼已读上报被拒绝", "cid", cid, "message_count", len(ids), "code", code, "body", response["body"])
-		} else {
-			c.logger.Debug("闲鱼已读上报成功", "cid", cid, "message_count", len(ids), "message_ids", ids, "code", response["code"])
+			c.logger.Warn("闲鱼已读上报被拒绝", "cid", cid, "message_count", 1, "code", code, "body", response["body"])
+			continue
 		}
+		c.logger.Debug("闲鱼已读上报成功", "cid", cid, "message_count", 1, "message_ids", []string{id}, "code", response["code"])
 	}
-	return err
+	return nil
 }
 
 // SendImage 发送一条闲鱼聊天图片消息。imageURL 应为闲鱼可访问的 CDN/公网 URL。
