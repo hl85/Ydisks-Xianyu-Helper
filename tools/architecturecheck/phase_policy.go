@@ -564,7 +564,9 @@ func scanGoProductionFiles(root string, inspect func(relativePath string, source
 			return walkErr
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "node_modules" || entry.Name() == "coverage" || entry.Name() == "static" {
+			// .worktree 是本地任务工作区，内含其它分支的过期源码快照；
+			// 不跳过会让冻结豁免等按精确相对路径匹配的规则对嵌套副本失效，产生与真实源码无关的误报。
+			if entry.Name() == ".git" || entry.Name() == ".worktree" || entry.Name() == "node_modules" || entry.Name() == "coverage" || entry.Name() == "static" {
 				return filepath.SkipDir
 			}
 			return nil
