@@ -383,13 +383,22 @@ func New(cfg Config) *Account {
 	})
 	// connection 保存绑定当前账号 facade 的连接编排组件；它只在构造完成后才可被 Run 调用。
 	a.connection = connectionCoordinator{account: a}
-	// gateConfig 是本次装配使用的发送闸门参数：显式配置优先，否则采用环境变量解析出的默认值。
+	// gate 是本次装配的账号发送闸门：显式配置优先，否则采用环境变量解析出的默认值。
+	// gateConfig 是本次装配使用的发送闸门参数；两者分离是为了持久化接线仍能拿到最终配置。
 	gateConfig := sendGateConfigFromEnv()
 	if cfg.SendGate != nil {
 		gateConfig = *cfg.SendGate
 	}
+	// gate 是本次装配的账号发送闸门实例；store 可用时接入计数持久化并恢复今日用量。
+	gate := newSendGate(gateConfig)
+	if cfg.Store != nil && cfg.Store.SendCounters != nil {
+		// restoreCtx 是启动期恢复读取的取消边界；构造无请求生命周期，使用独立的可取消 Context。
+		restoreCtx, restoreCancel := context.WithCancel(context.Background())
+		defer restoreCancel()
+		gate.attachPersistence(restoreCtx, cfg.Store.SendCounters, cfg.CookieID, logger)
+	}
 	// outgoing 保存绑定当前账号 facade 的出站消息协调器；它只读取连接快照后执行外部 I/O。
-	a.outgoing = outgoingMessageCoordinator{account: a, echoTracker: echoTracker, gate: newSendGate(gateConfig)}
+	a.outgoing = outgoingMessageCoordinator{account: a, echoTracker: echoTracker, gate: gate}
 	// credentials 保存绑定当前账号 facade 的凭证协调器；外部凭证 I/O 均由它控制锁边界。
 	a.credentials = credentialCoordinator{account: a}
 	return a

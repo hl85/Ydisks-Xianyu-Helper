@@ -12,6 +12,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math/rand/v2"
 	"os"
 	"strconv"
@@ -44,6 +45,15 @@ var ErrSendGateDailyLimit = errors.New("账号当日发送额度已用尽")
 
 // ErrSendGateQuietHours 表示当前处于配置的静默时段；本次发送被拒绝，而不是原地等待数小时。
 var ErrSendGateQuietHours = errors.New("当前处于发送静默时段")
+
+// SendCounterPersistence 是发送闸门对计数持久化的最小使用方接口；
+// 由使用方（如 *db.SendCounterStore）隐式实现，engine 不依赖具体存储类型。
+type SendCounterPersistence interface {
+	// GetSendCount 读取指定账号在指定自然日已登记的发送条数；无记录返回 0。
+	GetSendCount(ctx context.Context, cookieID, day string) (int, error)
+	// AddSendCount 在指定账号指定自然日累加 delta 条，并返回累加后的总条数。
+	AddSendCount(ctx context.Context, cookieID, day string, delta int) (int64, error)
+}
 
 // sendGateConfig 描述一个账号的发送闸门参数；全零配置表示闸门完全关闭。
 type sendGateConfig struct {
@@ -99,6 +109,65 @@ type sendGate struct {
 	sentToday int
 	// lastSentAt 是上一次登记发送的时刻，用于推算下一次最早可发送时间。
 	lastSentAt time.Time
+	// persist 是可选的发送计数持久化仓储；为空时闸门退化为纯内存日额度。
+	persist SendCounterPersistence
+	// cookieID 是当前账号标识，与 day 一起构成持久化计数键；由接线方在构造后注入。
+	cookieID string
+	// logger 用于记录写穿与恢复失败的告警；为空时静默降级。
+	logger *slog.Logger
+}
+
+// attachPersistence 为闸门接入计数持久化，并按 (cookieID, 今天) 从 DB 恢复内存计数。
+// 恢复取内存与 DB 的较大值：进程重启后内存从零重新累积，若 DB 已有更高用量必须继承，
+// 防止重启成为绕过日额度的漏洞。恢复失败只告警，不阻断账号启动（fail-open）。
+// ctx 是恢复读取的取消边界；global 预算的接入由独立方法完成，保持本方法只管账号桶。
+func (g *sendGate) attachPersistence(ctx context.Context, persist SendCounterPersistence, cookieID string, logger *slog.Logger) {
+	// now 取当前时刻使用的取时实现；与 acquire 保持同一缺省策略。
+	now := g.now
+	if now == nil {
+		now = time.Now
+	}
+	g.persist = persist
+	g.cookieID = cookieID
+	g.logger = logger
+	if persist == nil {
+		return
+	}
+	// today 是本次恢复对应的目标自然日；只恢复当天，历史桶不进内存。
+	today := now().Format("2006-01-02")
+	// dbCount、err 是 DB 中今日已登记条数与读取错误。
+	dbCount, err := persist.GetSendCount(ctx, cookieID, today)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("恢复发送计数失败，本次启动按纯内存额度运行", "account", cookieID, "day", today, "err", err)
+		}
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// 恢复期间内存计数仍为构造初值；仅当 DB 更高时抬升，避免缩小任何已消耗的额度。
+	if g.day == "" {
+		g.day = today
+	}
+	if dbCount > g.sentToday {
+		g.sentToday = dbCount
+	}
+}
+
+// writeThrough 把本次已登记的账号发送写穿到持久化计数；I/O 必须在闸门锁外执行。
+// 写入失败只记录告警，不阻断发送：持久化缺位时行为退化为纯内存日额度。
+func (g *sendGate) writeThrough(ctx context.Context, day string) {
+	// persist 是本次写穿使用的仓储快照；未接线时无事可做。
+	persist := g.persist
+	if persist == nil {
+		return
+	}
+	// total、err 是累加后的总条数与写穿错误；total 暂不消费，保留给诊断日志。
+	if _, err := persist.AddSendCount(ctx, g.cookieID, day, 1); err != nil {
+		if g.logger != nil {
+			g.logger.Warn("发送计数写穿失败，退化为纯内存日额度", "account", g.cookieID, "day", day, "err", err)
+		}
+	}
 }
 
 // newSendGate 按给定配置构造闸门，并使用生产实现填充取时、等待与抖动三个注入点。
@@ -161,6 +230,8 @@ func (g *sendGate) acquire(ctx context.Context) error {
 	g.lastSentAt = current.Add(wait)
 	g.sentToday++
 	g.mu.Unlock()
+	// 写穿在锁外执行：闸门临界区不做 I/O；写穿失败只告警，行为退化为纯内存额度。
+	g.writeThrough(ctx, today)
 	return sleep(ctx, wait)
 }
 
