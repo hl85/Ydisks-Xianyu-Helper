@@ -175,14 +175,17 @@ func TestMigrate_ExistingAutomationRunsReceiveEmptyDeliveryProof(t *testing.T) {
 	if varProof != "" {
 		t.Fatalf("历史运行凭证应为空: %q", varProof)
 	}
-	// finalVersion、versionErr 验证升级包含聊天删除截止线、认证代次、会话角色、凭证冷却与账号任务重试迁移，不能仅证明旧 delivery_proof 列存在。
+	// finalVersion、versionErr 验证升级包含聊天删除截止线、认证代次、会话角色、凭证冷却、账号任务重试与发送日计数迁移，不能仅证明旧 delivery_proof 列存在。
 	finalVersion, versionErr := goose.GetDBVersion(rawDB)
-	if versionErr != nil || finalVersion != 49 {
+	if versionErr != nil || finalVersion != 50 {
 		t.Fatalf("final migration version=%d err=%v", finalVersion, versionErr)
 	}
-	// credential_cooldowns 表由 00048 创建，账号任务重试计数列由 00049 创建，两者都必须在最终版本中存在。
+	// credential_cooldowns 表由 00048 创建，账号任务重试计数列由 00049 创建，发送日计数表由 00050 创建，都必须在最终版本中存在。
 	if !tableExists(t, rawDB, "credential_cooldowns") {
 		t.Fatal("升级后必须创建凭证冷却持久化表")
+	}
+	if !tableExists(t, rawDB, "send_daily_counters") {
+		t.Fatal("升级后必须创建发送日计数持久化表")
 	}
 	if !tableExists(t, rawDB, "order_ownership_repairs") {
 		t.Fatal("升级后必须创建订单归属修正审计表")
@@ -264,16 +267,19 @@ func TestMigrate_UpgradesDatabaseWithMainChatVersions(t *testing.T) {
 	if !columnExists(t, rawDB, "automation_rule_actions", "delivery_template_id") {
 		t.Fatal("automation_rule_actions should reference delivery templates")
 	}
-	// finalVersion、versionErr 验证迁移账本已推进到凭证冷却持久化（00048）与账号任务重试上限语义（00049），或记录读取失败。
+	// finalVersion、versionErr 验证迁移账本已推进到凭证冷却持久化（00048）、账号任务重试上限语义（00049）与发送日计数持久化（00050），或记录读取失败。
 	finalVersion, versionErr := goose.GetDBVersion(rawDB)
 	if versionErr != nil {
 		t.Fatalf("read final migration version: %v", versionErr)
 	}
-	if finalVersion != 49 {
-		t.Fatalf("final migration version=%d, want 49", finalVersion)
+	if finalVersion != 50 {
+		t.Fatalf("final migration version=%d, want 50", finalVersion)
 	}
 	if !columnExists(t, rawDB, "account_task_runs", "attempt_count") {
 		t.Fatal("account_task_runs should include the retry attempt counter")
+	}
+	if !tableExists(t, rawDB, "send_daily_counters") {
+		t.Fatal("已发布 main 数据库升级后必须创建发送日计数持久化表")
 	}
 	if !tableExists(t, rawDB, "order_ownership_repairs") {
 		t.Fatal("已发布 main 数据库升级后必须创建订单归属修正审计表")

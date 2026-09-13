@@ -36,8 +36,10 @@ type Store struct {
 	PublishBatches   *ItemPublishBatches
 	Tokens           *AccountTokens
 	Renewal          *RenewalStore
-	LoginLogs        *AccountLoginLogs
-	RiskLogs         *RiskControlLogs
+	// SendCounters 保存出站发送日计数的持久化仓储，供发送闸门恢复与写穿。
+	SendCounters *SendCounterStore
+	LoginLogs    *AccountLoginLogs
+	RiskLogs     *RiskControlLogs
 	// SecurityAudit 保存敏感配置访问审计记录。
 	SecurityAudit *SecurityAuditLogs
 	Chats         *ChatStore
@@ -99,6 +101,7 @@ func NewStore(db *sql.DB, dialect Dialect) *Store {
 		PublishBatches:    &ItemPublishBatches{DB: db},
 		Tokens:            &AccountTokens{DB: db, Dialect: dialect, codec: codec},
 		Renewal:           &RenewalStore{DB: db, Dialect: dialect},
+		SendCounters:      &SendCounterStore{DB: db, Dialect: dialect},
 		LoginLogs:         &AccountLoginLogs{DB: db},
 		RiskLogs:          &RiskControlLogs{DB: db, Dialect: dialect},
 		SecurityAudit:     &SecurityAuditLogs{DB: db},
