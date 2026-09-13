@@ -157,10 +157,12 @@ type ChatMessage struct {
 // OutgoingChatMessage 是账号 WebSocket 接受或回显的一条非敏感出站消息摘要。
 // 它同时供自动化回显确认和聊天历史旁路落库使用；持久化错误不能改写已经由发送层判定的外部结果。
 type OutgoingChatMessage struct {
-	AccountID  string
-	ChatID     string
-	BuyerID    string
-	Text       string
+	AccountID string
+	ChatID    string
+	BuyerID   string
+	Text      string
+	// RequestID 是发送请求使用的 mid；只有发送响应回调携带该值时才用于精确唤醒对应等待器。
+	RequestID  string
 	MessageKey string
 	// MessageType 是出站消息的展示类型；空值兼容历史文本观察。
 	MessageType string
@@ -370,7 +372,7 @@ func New(cfg Config) *Account {
 		CookieID:        cfg.CookieID,
 		CurrentCookie:   a.currentCookieStr,
 		CurrentHandler:  func() Handler { return a.handler },
-		ObserveOutgoing: echoTracker.observe,
+		ObserveOutgoing: echoTracker.observeMessage,
 		Reply:           a.reply,
 		ItemPublisher:   publisher,
 		Logger:          logger,

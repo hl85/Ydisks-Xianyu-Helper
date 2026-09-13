@@ -8,6 +8,40 @@ import (
 	"xianyu-go/internal/db"
 )
 
+// triggerAwareNotificationProbe 记录自动化中心是否传递了具体触发类别。
+type triggerAwareNotificationProbe struct {
+	// triggerType 保存自动化中心传入的触发类别编码。
+	triggerType string
+	// calls 保存按触发类别通知入口被调用的次数。
+	calls int
+}
+
+// NotifyAutomationRun 记录旧版统一通知入口，便于确认测试替身仍满足兼容接口。
+func (p *triggerAwareNotificationProbe) NotifyAutomationRun(context.Context, int64, string, string, string, string, string, string) {
+	// calls 保存兼容入口被调用次数；本测试期望新入口被选择，因此通常为零。
+	p.calls++
+}
+
+// NotifyAutomationRunForTrigger 记录按触发类别通知入口收到的编码。
+func (p *triggerAwareNotificationProbe) NotifyAutomationRunForTrigger(_ context.Context, triggerType string, _ int64, _ string, _ string, _ string, _ string, _ string, _ string) {
+	// triggerType 保存本次自动化终态通知的细分类别。
+	p.triggerType = triggerType
+	// calls 保存按触发类别通知入口被调用次数。
+	p.calls++
+}
+
+// TestAutomationNotifierPassesTriggerCategory 验证自动化中心把四类任务编码传给支持细分事件的通知器。
+func TestAutomationNotifierPassesTriggerCategory(t *testing.T) {
+	// probe 保存能够同时实现新旧通知接口的本地替身。
+	probe := &triggerAwareNotificationProbe{}
+	// delivery 保存使用该替身的通知协调器。
+	delivery := deliveryNotifier{current: func() Notifier { return probe }}
+	delivery.notifyResult(context.Background(), Task{TriggerType: TriggerOrderCreated, OrderID: "order"}, 8, "success", 1, "")
+	if probe.calls != 1 || probe.triggerType != TriggerOrderCreated {
+		t.Fatalf("trigger-aware notification calls=%d trigger=%q", probe.calls, probe.triggerType)
+	}
+}
+
 // TestAutomationNotificationsCoverOptionalAndTerminalBranches 验证自动化通知器的可选依赖、成功空跑、失败和人工核对通知。
 func TestAutomationNotificationsCoverOptionalAndTerminalBranches(t *testing.T) {
 	// ctx 是通知测试共用的上下文。

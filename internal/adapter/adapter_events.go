@@ -334,12 +334,12 @@ func (a *Adapter) FetchOrderDetail(ctx context.Context, cookieID, orderID, itemI
 	}
 	// detail、err 用于本次流程后续判断的detail、err
 	detail, err := a.fetchOrderDetailAttempt(ctx, cookieID, orderID)
-	if err == nil || !mtop.IsSessionExpiredErr(err) {
+	if err == nil || !mtop.IsCredentialRefreshableErr(err) {
 		return detail, err
 	}
-	a.logger.Warn("订单详情检测到 Session 过期，开始即时续期", "account", cookieID, "order_id", orderID)
+	a.logger.Warn("订单详情检测到凭证失效，开始即时续期", "account", cookieID, "order_id", orderID)
 	if !a.OnPasswordLoginRefresh(ctx, cookieID) {
-		return nil, fmt.Errorf("订单详情 Session 过期且即时续期失败: %w", err)
+		return nil, fmt.Errorf("订单详情凭证失效且即时续期失败: %w", err)
 	}
 	a.logger.Info("Cookie 即时续期成功，重新请求订单详情", "account", cookieID, "order_id", orderID)
 	return a.fetchOrderDetailAttempt(ctx, cookieID, orderID)
@@ -676,38 +676,6 @@ func (a *Adapter) tryProtocolCredentialRenew(ctx context.Context, d *db.CookiePl
 	current := d.Value
 	// api 用于本次流程后续判断的api
 	api := a.renewSvc
-	// save 用于本次流程后续判断的save
-	save := func(cookieStr string, setCookies []string, completeSnapshot []cookierefresh.BrowserCookie) error {
-		if cookieStr == current && len(setCookies) == 0 && completeSnapshot == nil {
-			return nil
-		}
-		// metadata 用于本次流程后续判断的metadata
-		metadata := cookierefresh.MetadataWithoutSnapshot(d.MetadataJSON)
-		if completeSnapshot != nil {
-			// API 在完整 Jar 基础上得到的快照是权威结果，包含
-			// 服务端删除和新的 Domain/Path/expiry 属性。
-			metadata = cookierefresh.MetadataWithSnapshot(d.MetadataJSON, completeSnapshot)
-		}
-		if // err 用于本次流程后续判断的err
-		err := a.store.Cookies.UpdateRenewalCookie(ctx, d.ID, cookieStr, metadata, time.Now().Unix()); err != nil {
-			a.logger.Warn("轻量续期保存 Cookie 失败", "account", d.ID, "err", err)
-			return err
-		}
-		// valueChanged 用于本次流程后续判断的值Changed
-		valueChanged := cookieStr != current
-		current = cookieStr
-		d.Value = cookieStr
-		d.MetadataJSON = metadata
-		if valueChanged && a.store.Tokens != nil {
-			if // err 用于本次流程后续判断的err
-			err := a.store.Tokens.Clear(ctx, d.ID); err != nil {
-				// Token 仅是运行期缓存；Cookie 已原子提交后不能再把整次
-				// 续期报告成失败，否则调用方可能用旧凭证重试并覆盖新 Jar。
-				a.logger.Warn("轻量续期清理旧 Token 缓存失败", "account", d.ID, "err", err)
-			}
-		}
-		return nil
-	}
 	// 官网始终先由 auto-login plugin 按 havana_lgc_exp/cookie3_bak_exp
 	// 决定是否调用 silentHasLogin。Go 客户端复刻该 HTTP 协议，不加载页面。
 	// runCtx、cancel 用于本次流程后续判断的运行Ctx、cancel
@@ -716,16 +684,8 @@ func (a *Adapter) tryProtocolCredentialRenew(ctx context.Context, d *db.CookiePl
 	// res、err 用于本次流程后续判断的res、err
 	res, err := api.RenewAfterSessionExpired(runCtx, current, cookierefresh.SnapshotFromMetadata(d.MetadataJSON))
 	if res != nil {
-		// completeSnapshot 用于本次流程后续判断的completeSnapshot
-		var completeSnapshot []cookierefresh.BrowserCookie
-		if res.CookieSnapshotComplete {
-			completeSnapshot = res.CookieSnapshot
-			if completeSnapshot == nil {
-				completeSnapshot = []cookierefresh.BrowserCookie{}
-			}
-		}
 		if // saveErr 用于本次流程后续判断的saveErr
-		saveErr := save(res.NewCookies, res.SetCookies, completeSnapshot); saveErr != nil {
+		saveErr := a.persistProtocolRenewalResponse(ctx, d, res); saveErr != nil {
 			return false, saveErr
 		}
 		if res.HasPending() {
@@ -743,16 +703,8 @@ func (a *Adapter) tryProtocolCredentialRenew(ctx context.Context, d *db.CookiePl
 				}
 				return false, errors.New("协议续期底层响应未返回结果")
 			}
-			// lateSnapshot 用于本次流程后续判断的lateSnapshot
-			var lateSnapshot []cookierefresh.BrowserCookie
-			if late.CookieSnapshotComplete {
-				lateSnapshot = late.CookieSnapshot
-				if lateSnapshot == nil {
-					lateSnapshot = []cookierefresh.BrowserCookie{}
-				}
-			}
 			if // saveErr 用于本次流程后续判断的saveErr
-			saveErr := save(late.NewCookies, late.SetCookies, lateSnapshot); saveErr != nil {
+			saveErr := a.persistProtocolRenewalResponse(ctx, d, late); saveErr != nil {
 				return false, saveErr
 			}
 			if waitErr != nil {

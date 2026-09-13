@@ -85,7 +85,7 @@ type OrderDetailFetcher interface {
 	FetchOrderDetail(ctx context.Context, cookieID, orderID, itemID, buyerID, cookieStr string) (*OrderDetail, error)
 }
 
-// CredentialRecoverer 在平台明确返回 Session 失效时执行一次凭证恢复。
+// CredentialRecoverer 在平台明确返回 Session 或 MTOP Token 失效时执行一次凭证恢复。
 type CredentialRecoverer interface {
 	RecoverExpiredCredential(ctx context.Context, cookieID string) bool
 }
@@ -238,7 +238,25 @@ func NewWithDependencies(store *db.Store, senders SenderProvider, logger *slog.L
 
 // RunAccountTask 执行指定账号任务，并保持 Center 的公开兼容入口。
 func (c *Center) RunAccountTask(ctx context.Context, accountID, taskType string) (AccountTaskSummary, error) {
-	return c.taskRunner.runAccountTask(ctx, accountID, taskType)
+	if c == nil || c.taskRunner.repository == nil {
+		return AccountTaskSummary{TaskType: taskType}, errors.New("账号任务协调器未初始化")
+	}
+	// summary、err 保存账号任务执行结果及其错误，供日志和兼容调用方共同使用。
+	summary, err := c.taskRunner.runAccountTask(ctx, accountID, taskType)
+	if c.logger == nil {
+		return summary, err
+	}
+	if err != nil {
+		if errors.Is(err, errAccountTaskCredentialRenewed) {
+			c.logger.Info("手动账号任务因凭证续期暂停，等待下一次执行", "account", accountID, "task", taskType, "err", err)
+		} else {
+			c.logger.Warn("手动账号任务执行失败", "account", accountID, "task", taskType, "err", err)
+		}
+		return summary, err
+	}
+	c.logger.Info("手动账号任务执行成功", "account", accountID, "task", taskType,
+		"found", summary.Found, "success", summary.Success, "failed", summary.Failed, "skipped", summary.Skipped)
+	return summary, nil
 }
 
 // scanAccountTasks 扫描启用的账号任务，并委托给账号任务协调器。

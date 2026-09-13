@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act,fireEvent,render,renderHook,screen,waitFor } from '@testing-library/react';
 import { beforeEach,describe,expect,test,vi } from 'vitest';
-import { confirmedOutgoingMessageFromError,getChatItems,sendChatItemCard } from './api';
+import { confirmedOutgoingMessageFromError,getChatItems,sendChatItemCard,uncertainOutgoingMessageFromError } from './api';
 import { ChatItemPickerDialog } from './components/ChatItemPickerDialog';
 import type { ChatItem,ChatMessage } from './models';
 import { useChatItemPicker } from './useChatItemPicker';
@@ -10,6 +10,7 @@ vi.mock('./api', /* chatItemApiMockFactory 提供商品选择 Hook 的确定性 
   getChatItems: vi.fn(),
   sendChatItemCard: vi.fn(),
   confirmedOutgoingMessageFromError: vi.fn(),
+  uncertainOutgoingMessageFromError: vi.fn(),
 }));
 
 // getChatItemsMock 是商品分页请求的可控替身。
@@ -56,6 +57,7 @@ describe('useChatItemPicker', /* 当前测试组覆盖商品弹窗查询、分�
     getChatItemsMock.mockResolvedValue({ items: [firstItem], page: 1, has_more: true });
     sendChatItemCardMock.mockResolvedValue({ message: sentMessage });
     confirmedOutgoingMessageMock.mockReturnValue(undefined);
+    vi.mocked(uncertainOutgoingMessageFromError).mockReturnValue(undefined);
   });
 
   test('默认查询 TA 的宝贝，搜索需提交且切换标签会清空搜索', /* 当前回调验证默认标签和提交式搜索语义。 */ async () => {
@@ -197,4 +199,48 @@ describe('useChatItemPicker', /* 当前测试组覆盖商品弹窗查询、分�
 		await act(/* finishSendAction 完成发送并释放弹窗状态。 */ async () => request.resolve({ message: sentMessage }));
 		expect(onSent).toHaveBeenCalledWith(sentMessage);
 	});
+  test('未知发送结果展示核对消息并关闭弹窗，跨会话结果不能合并', /* 当前测试覆盖待确认消息及其账号会话隔离。 */ async () => {
+    // onSent 和 onClose 记录消息合并与发送流程结束。
+    const onSent = vi.fn();
+    const onClose = vi.fn();
+    // hook 提供固定账号会话的发送入口。
+    const hook = renderHook(/* pickerFactory 创建待确认发送场景。 */ () => useChatItemPicker({ open: true, accountID: 'account-1', chatID: 'chat-1', onSent, onClose }));
+    await waitFor(/* loadedAssertion 等待商品可发送。 */ () => expect(hook.result.current.items).toEqual([firstItem]));
+    sendChatItemCardMock.mockRejectedValue(new Error('发送结果待确认'));
+    vi.mocked(uncertainOutgoingMessageFromError).mockReturnValue({ ...sentMessage, chat_id: 'other-chat', status: 'uncertain' });
+    await act(/* wrongChatAction 验证错误归属结果不会污染当前会话。 */ async () => hook.result.current.sendItem(firstItem));
+    expect(onSent).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    vi.mocked(uncertainOutgoingMessageFromError).mockReturnValue({ ...sentMessage, status: 'uncertain' });
+    await act(/* uncertainAction 处理正确归属的待确认消息。 */ async () => hook.result.current.sendItem(firstItem));
+    expect(onSent).toHaveBeenCalledWith(expect.objectContaining({ status: 'uncertain', chat_id: 'chat-1' }), expect.stringContaining('核对'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(hook.result.current.error).toBe('');
+  });
+
+
+  test('发送中切换会话后解除旧发送占用并忽略迟到成功', /* 当前回调验证取消旧发送与新会话发送能力同时收口。 */ async () => {
+    // oldSend 保存第一会话迟到的发送响应。
+    const oldSend = deferred<{ /** message 是迟到的旧会话出站消息。 */ message: ChatMessage }>();
+    sendChatItemCardMock.mockImplementationOnce(/* 当前回调阻塞第一会话发送。 */ () => oldSend.promise);
+    // onSent、onClose 分别记录出站合并和弹窗关闭。
+    const onSent = vi.fn();
+    const onClose = vi.fn();
+    // hook 允许保持弹窗打开并切换当前会话。
+    const hook = renderHook(/* props 是当前测试会话身份。 */ (props: PickerProps) => useChatItemPicker({ open: true, accountID: 'account-1', chatID: props.chatID, onSent, onClose }), { initialProps: { chatID: 'chat-1' } });
+    await waitFor(/* 当前回调等待商品首页就绪。 */ () => expect(hook.result.current.loading).toBe(false));
+    // sending 保存旧发送异步调用，必须在测试结束前完成。
+    let sending: Promise<void> | undefined;
+    await act(/* 当前回调开始第一会话发送。 */ () => { sending = hook.result.current.sendItem(firstItem); });
+    expect(hook.result.current.sendingItemID).toBe(firstItem.item_id);
+    hook.rerender({ chatID: 'chat-2' });
+    await waitFor(/* 当前回调等待新会话解除发送占用。 */ () => expect(hook.result.current.sendingItemID).toBe(''));
+    await act(/* 当前回调完成旧发送，新会话不得收到回调。 */ async () => { oldSend.resolve({ message: sentMessage }); await sending; });
+    expect(onSent).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    sendChatItemCardMock.mockResolvedValueOnce({ message: { ...sentMessage, chat_id: 'chat-2' } });
+    await act(/* 当前回调发送新会话商品，验证入口没有被旧状态卡住。 */ async () => { await hook.result.current.sendItem(firstItem); });
+    expect(onSent).toHaveBeenCalledTimes(1);
+    hook.unmount();
+  });
 });

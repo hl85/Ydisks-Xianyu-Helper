@@ -167,12 +167,18 @@ func classifyLoginStatus(ret []string, cookieUpdated bool) (string, string) {
 	}
 	// retStr 用于本次流程后续判断的retStr
 	retStr := strings.Join(ret, " ")
+	// upperRetStr 统一官方 SDK 使用的英文登录态错误码大小写，避免不同网关大小写导致分类漂移。
+	upperRetStr := strings.ToUpper(retStr)
 	switch {
-	case strings.Contains(retStr, "TOKEN_EMPTY") || strings.Contains(retStr, "令牌为空"):
+	case strings.Contains(upperRetStr, "TOKEN_EMPTY") || strings.Contains(retStr, "令牌为空"):
 		return LoginStatusTokenEmpty, "令牌为空，需要重新登录"
-	case strings.Contains(retStr, "SESSION_EXPIRED") || strings.Contains(retStr, "Session过期"):
+	case strings.Contains(upperRetStr, "SESSION_EXPIRED") ||
+		strings.Contains(upperRetStr, "SID_INVALID") ||
+		strings.Contains(upperRetStr, "AUTH_REJECT") ||
+		strings.Contains(upperRetStr, "NEED_LOGIN") ||
+		strings.Contains(retStr, "Session过期"):
 		return LoginStatusSessionExpired, "Session过期，需要重新登录"
-	case strings.Contains(retStr, "TOKEN_EXOIRED") || strings.Contains(retStr, "TOKEN_EXPIRED"):
+	case strings.Contains(upperRetStr, "TOKEN_EXOIRED") || strings.Contains(upperRetStr, "TOKEN_EXPIRED"):
 		if cookieUpdated {
 			return LoginStatusTokenRefreshed, "令牌已刷新"
 		}

@@ -139,6 +139,8 @@ type fakeWSConn struct {
 	sentImages    []string
 	imageWidths   []int
 	imageHeights  []int
+	// sendErr 控制文本和图片发送返回的模拟平台结果。
+	sendErr       error
 	heartbeatDone chan struct{}
 	closeCh       chan struct{}
 	closeOnce     sync.Once
@@ -244,8 +246,10 @@ func TestRunRotatesTokenBeforeExpiry(t *testing.T) {
 func (f *fakeWSConn) SendText(_ context.Context, _, _, _, text string) error {
 	f.mu.Lock()
 	f.sentTexts = append(f.sentTexts, text)
+	// err 保存当前测试替身预设的文本发送结果。
+	err := f.sendErr
 	f.mu.Unlock()
-	return nil
+	return err
 }
 
 // SendImage 封装Send图片业务协调。
@@ -254,8 +258,10 @@ func (f *fakeWSConn) SendImage(_ context.Context, _, _, _, url string, width, he
 	f.sentImages = append(f.sentImages, url)
 	f.imageWidths = append(f.imageWidths, width)
 	f.imageHeights = append(f.imageHeights, height)
+	// err 保存当前测试替身预设的图片发送结果。
+	err := f.sendErr
 	f.mu.Unlock()
-	return nil
+	return err
 }
 
 // TestAccountSendImagePreservesDimensions 验证账号运行时将调用方提供的真实图片尺寸交给 WebSocket。

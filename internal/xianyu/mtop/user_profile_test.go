@@ -183,7 +183,7 @@ func TestFetchUserProfileRefreshTokenFailure(t *testing.T) {
 }
 
 // TestFetchUserProfileRetryExhausted: token 过期但每次都通过新 Set-Cookie 重试，4 次后耗尽。
-// 关键：每次下发的 Cookie 值都不同，使 updatedCookies != currentCookies，跳过 RefreshToken 走 continue。
+// 关键：每次下发的签名令牌值都不同，响应已完成令牌轮换，直接重试而不再调用 RefreshToken。
 // TestFetchUserProfileRetryExhausted 封装TestFetch用户Profile重试Exhausted业务协调。
 func TestFetchUserProfileRetryExhausted(t *testing.T) {
 	// requests 用于本次流程后续判断的请求列表
@@ -192,7 +192,7 @@ func TestFetchUserProfileRetryExhausted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// n 用于本次流程后续判断的n
 		n := requests.Add(1)
-		// 每次下发不同的 _m_h5_tk 值，确保 updatedCookies != currentCookies
+		// 每次下发不同的 _m_h5_tk 值，确保只比较签名令牌时也能识别已轮换。
 		http.SetCookie(w, &http.Cookie{Name: "_m_h5_tk", Value: fmt.Sprintf("tok_%d", n), Path: "/"})
 		fmt.Fprint(w, `{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"]}`)
 	}))

@@ -22,6 +22,8 @@ func TestNotificationPureMappings(t *testing.T) {
 	eventCases := map[string]string{
 		EventAccountOffline: "掉线通知", EventAccountRecovered: "恢复通知", EventAccountDisabled: "禁用通知",
 		EventSecurityVerification: "风控验证", EventTokenRenewal: "续期通知", EventDeliveryResult: "交易通知",
+		EventAutomationOrderCreated: "拍下改价", EventAutomationOrderPaid: "付款发货", EventAutomationBuyerReviewed: "评价赠品",
+		EventAutomationReviewMissingTimeout: "求评价", EventManualDeliveryResult: "手动发货结果",
 		EventSystemError: "系统错误", "": "通知", "custom": "custom",
 	}
 	// event、want 表示当前事件及预期展示标签。

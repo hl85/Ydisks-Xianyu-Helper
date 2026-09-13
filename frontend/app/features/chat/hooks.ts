@@ -125,8 +125,6 @@ export const useChat = (): UseChatResult => {
   const [platformHasMoreContacts, setPlatformHasMoreContacts] = useState<Record<string, boolean>>({});
   // storedHasMoreContacts 保存各账号本地缓存联系人分页是否仍有下一页。
   const [storedHasMoreContacts, setStoredHasMoreContacts] = useState<Record<string, boolean>>({});
-  // hasMoreContacts 保存各账号是否还有联系人。
-  const [hasMoreContacts, setHasMoreContacts] = useState<Record<string, boolean>>({});
   // contactsLoading 表示联系人分页状态。
   const [contactsLoading, setContactsLoading] = useState(false);
   // emojiOpen 控制表情选择器显示。
@@ -187,6 +185,8 @@ export const useChat = (): UseChatResult => {
   const sendController = useRef<AbortController | null>(null);
 	// deleteSequence 隔离账号切换、重复提交和卸载后的过期删除响应。
 	const deleteSequence = useRef(0);
+  // sessionReloadingRef 在首页替换期间阻止旧游标分页，只有最新首页请求可以解除。
+  const sessionReloadingRef = useRef(false);
   // deleteController 保存当前会话删除请求控制器，生命周期由本 Hook 独占。
   const deleteController = useRef<AbortController | null>(null);
 	// suppressAutoSelectAccountRef 保存删除当前会话后禁止自动选择的账号，直到用户主动选择新会话。
@@ -210,6 +210,10 @@ export const useChat = (): UseChatResult => {
   const reloadSessions = useCallback(/* 当前回调封装可复用的交互处理逻辑。 */ async (accountID: string): Promise<ChatSession[]> => {
     // sequence 请求序号。
     const sequence = ++sessionSequence.current;
+    sessionReloadingRef.current = true;
+    contactSequence.current += 1;
+    contactController.current?.abort();
+    setContactsLoading(false);
     sessionController.current?.abort();
     // controller 请求取消控制器。
     const controller = new AbortController();
@@ -229,12 +233,13 @@ export const useChat = (): UseChatResult => {
       setStoredContactCursors(/* 当前回调写入本地联系人首页的下一键集游标。 */ current => ({ ...current, [accountID]: page.next_stored_cursor }));
       setPlatformHasMoreContacts(/* 当前回调写入平台联系人是否还有下一页。 */ current => ({ ...current, [accountID]: page.platform_has_more ?? page.has_more }));
       setStoredHasMoreContacts(/* 当前回调写入本地联系人是否还有下一页。 */ current => ({ ...current, [accountID]: page.stored_has_more ?? page.has_more }));
-      setHasMoreContacts(/* 当前回调保留当前账号兼容的合并分页状态。 */ current => ({ ...current, [accountID]: page.has_more }));
       setSendNotice('');
       return sessions;
     } catch (/* error 保存会话列表请求的失败原因；仅最新请求可以更新错误状态。 */ error) {
       if (isCurrentChatRequest(sessionSequence.current, sequence, controller.signal) && !isChatAbortError(error)) setError(error instanceof Error ? error.message : '同步会话失败');
       return [];
+    } finally {
+      if (sessionSequence.current === sequence) sessionReloadingRef.current = false;
     }
   }, []);
 
@@ -242,6 +247,10 @@ export const useChat = (): UseChatResult => {
 	const reloadLocalSessions = useCallback(/* reloadLocalSessions 固定执行本地会话读取，不允许切换为平台刷新。 */ async (accountID: string): Promise<ChatSession[]> => {
 		// sequence 隔离本地恢复请求与账号切换或删除产生的旧响应。
 		const sequence = ++sessionSequence.current;
+    sessionReloadingRef.current = true;
+    contactSequence.current += 1;
+    contactController.current?.abort();
+    setContactsLoading(false);
 		sessionController.current?.abort();
 		// controller 保存本次本地读取请求的取消边界。
 		const controller = new AbortController();
@@ -259,7 +268,9 @@ export const useChat = (): UseChatResult => {
 		} catch (/* error 保存本地会话读取失败原因。 */ error) {
 			if (isCurrentChatRequest(sessionSequence.current, sequence, controller.signal) && !isChatAbortError(error)) setError(error instanceof Error ? error.message : '读取本地会话失败');
 			return [];
-		}
+		} finally {
+      if (sessionSequence.current === sequence) sessionReloadingRef.current = false;
+    }
 	}, []);
 
   useEffect(/* 当前回调同步 React 副作用和资源生命周期。 */ () => {
@@ -291,7 +302,6 @@ export const useChat = (): UseChatResult => {
         setStoredContactCursors(Object.fromEntries(sessionPages.map(/* 当前回调记录每个账号本地联系人首页的下一游标。 */ ([id, page]) => [id, page.next_stored_cursor])));
         setPlatformHasMoreContacts(Object.fromEntries(sessionPages.map(/* 当前回调记录每个账号平台联系人分页状态。 */ ([id, page]) => [id, page.platform_has_more ?? page.has_more])));
         setStoredHasMoreContacts(Object.fromEntries(sessionPages.map(/* 当前回调记录每个账号本地联系人分页状态。 */ ([id, page]) => [id, page.stored_has_more ?? page.has_more])));
-        setHasMoreContacts(Object.fromEntries(sessionPages.map(/* 当前回调处理集合中的单个元素。 */ ([id, page]) => [id, page.has_more])));
         // stored 已保存数据。
         const stored = window.localStorage.getItem('ydisks.chat.account.v1') || '';
         // first 首项。
@@ -401,6 +411,7 @@ export const useChat = (): UseChatResult => {
   useEffect(/* 当前回调同步 React 副作用和资源生命周期。 */ () => {
     contactController.current?.abort();
     contactSequence.current += 1;
+    setContactsLoading(false);
   }, [activeAccountID]);
 
 	useEffect(/* 当前回调在账号切换时取消旧账号的删除请求，防止迟到响应改写新账号列表。 */ () => {
@@ -578,7 +589,7 @@ export const useChat = (): UseChatResult => {
 
   /** 加载当前账号下一页联系人。 */
   const loadMoreContacts = useCallback(/* 当前回调封装可复用的交互处理逻辑。 */ async (): Promise<void> => {
-    if (!activeAccountID || contactsLoading || !hasMoreContacts[activeAccountID]) return;
+    if (!activeAccountID || sessionReloadingRef.current || deletingAccountIDRef.current === activeAccountID || contactsLoading || !(platformHasMoreContacts[activeAccountID] || storedHasMoreContacts[activeAccountID])) return;
     // sequence 请求序号。
     const sequence = ++contactSequence.current;
     contactController.current?.abort();
@@ -600,13 +611,12 @@ export const useChat = (): UseChatResult => {
       setStoredContactCursors(/* 当前回调写入下一本地联系人页游标。 */ current => ({ ...current, [accountID]: page.next_stored_cursor }));
       setPlatformHasMoreContacts(/* 当前回调写入新的平台联系人分页状态。 */ current => ({ ...current, [accountID]: page.platform_has_more ?? page.has_more }));
       setStoredHasMoreContacts(/* 当前回调写入新的本地联系人分页状态。 */ current => ({ ...current, [accountID]: page.stored_has_more ?? page.has_more }));
-      setHasMoreContacts(/* 当前回调处理用户交互或异步状态变化。 */ current => ({ ...current, [accountID]: page.has_more }));
     } catch (/* loadError 表示加载错误。 */ loadError) {
       if (isCurrentChatRequest(contactSequence.current, sequence, controller.signal) && !isChatAbortError(loadError)) setError(loadError instanceof Error ? loadError.message : '加载历史联系人失败');
     } finally {
       if (isCurrentChatRequest(contactSequence.current, sequence, controller.signal)) setContactsLoading(false);
     }
-  }, [activeAccountID, contactCursors, contactsLoading, hasMoreContacts, platformHasMoreContacts, storedContactCursors]);
+  }, [activeAccountID, contactCursors, contactsLoading, platformHasMoreContacts, storedHasMoreContacts, storedContactCursors]);
 
   /** 发送文本消息并记录失败重试数据。 */
   const sendText = useCallback(/* 当前回调封装可复用的交互处理逻辑。 */ async (text: string, rememberRetry: boolean, clearDraft: boolean): Promise<void> => {
@@ -764,16 +774,20 @@ export const useChat = (): UseChatResult => {
 			setDeletingChatID(chatID);
 		setDeleteError('');
 		try {
-				sessionSequence.current += 1;
+			sessionSequence.current += 1;
+      sessionReloadingRef.current = false;
 			contactSequence.current += 1;
 			sessionController.current?.abort();
 			contactController.current?.abort();
+			setContactsLoading(false);
 				await deleteChatSession(accountID, chatID, { signal: controller.signal });
 				if (!isCurrentChatRequest(deleteSequence.current, sequence, controller.signal)) return false;
 				sessionSequence.current += 1;
+      sessionReloadingRef.current = false;
 				contactSequence.current += 1;
 				sessionController.current?.abort();
 				contactController.current?.abort();
+				setContactsLoading(false);
 				if (activeAccountRef.current === accountID && activeChatRef.current === chatID) suppressAutoSelectAccountRef.current = accountID;
 			setSessionsByAccount(/* current 保存全部账号已加载会话，只从目标账号移除已删除行。 */ current => ({
 				...current,
@@ -800,12 +814,14 @@ export const useChat = (): UseChatResult => {
 				setSendNotice('');
 			}
 				await reloadLocalSessions(accountID);
+        if (!isCurrentChatRequest(deleteSequence.current, sequence, controller.signal)) return false;
 				// needsFollowupLocalReload 保存首次本地读取期间是否又收到目标实时事件。
 				const needsFollowupLocalReload = deletionNeedsLocalReloadRef.current;
 				deletingAccountIDRef.current = '';
 				deletingSessionIDRef.current = '';
 				deletionNeedsLocalReloadRef.current = false;
 				if (needsFollowupLocalReload && isCurrentChatRequest(deleteSequence.current, sequence, controller.signal)) await reloadLocalSessions(accountID);
+        if (!isCurrentChatRequest(deleteSequence.current, sequence, controller.signal)) return false;
 				return true;
 		} catch (/* deleteRequestError 保存本次删除请求失败原因；取消和过期响应保持静默。 */ deleteRequestError) {
 			if (isCurrentChatRequest(deleteSequence.current, sequence, controller.signal) && !isChatAbortError(deleteRequestError)) {
@@ -813,12 +829,14 @@ export const useChat = (): UseChatResult => {
 			}
 				if (isCurrentChatRequest(deleteSequence.current, sequence, controller.signal)) {
 					await reloadLocalSessions(accountID);
+        if (!isCurrentChatRequest(deleteSequence.current, sequence, controller.signal)) return false;
 					// needsFollowupLocalReload 保存失败恢复读取期间是否又收到目标实时事件。
 					const needsFollowupLocalReload = deletionNeedsLocalReloadRef.current;
 					deletingAccountIDRef.current = '';
 					deletingSessionIDRef.current = '';
 					deletionNeedsLocalReloadRef.current = false;
 					if (needsFollowupLocalReload) await reloadLocalSessions(accountID);
+        if (!isCurrentChatRequest(deleteSequence.current, sequence, controller.signal)) return false;
 				}
 			return false;
 		} finally {
@@ -840,7 +858,7 @@ export const useChat = (): UseChatResult => {
 	}, []);
 
   return {
-    accounts, activeAccountID, activeSessions, selectedSession, activeAccount, messages, search, unreadOnly, draft, loading, messagesLoading, olderLoading, hasOlder, contactsLoading, hasMoreContacts: platformHasMoreContacts[activeAccountID] === true || storedHasMoreContacts[activeAccountID] === true || hasMoreContacts[activeAccountID] === true, emojiOpen, sending, error, sendNotice, liveState, pendingImage,
+    accounts, activeAccountID, activeSessions, selectedSession, activeAccount, messages, search, unreadOnly, draft, loading, messagesLoading, olderLoading, hasOlder, contactsLoading, hasMoreContacts: platformHasMoreContacts[activeAccountID] === true || storedHasMoreContacts[activeAccountID] === true, emojiOpen, sending, error, sendNotice, liveState, pendingImage,
     activeChatID, filteredSessions, scrollRef, imageInputRef, setActiveAccountID, setActiveChatID, setSearch, setUnreadOnly, setDraft, setEmojiOpen,
 		reloadSessions, loadMoreContacts, loadOlderMessages, handleMessageScroll, handleSend, handleQuickReply, handleImage, handlePastedImages, confirmSendImage, closeImagePreview, retrySend, retryAvailable: Boolean(retryText || retryImage), deletingChatID, deleteError, deleteConversation, clearDeleteError, acceptOutgoingMessage, unreadForAccount,
     emojiURL, xianyuEmojis, renderXianyuText, formatClock, messageTime,

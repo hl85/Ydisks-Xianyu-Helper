@@ -1135,6 +1135,28 @@ func TestAutomationIssuePolicyForDisabledRuleRequiresReenableBeforeRetry(t *test
 	}
 }
 
+// TestAutomationIssuePolicyRejectsHistoricalPartialRetry 验证历史记录丢失动作占用标志但已有发送数量时只能人工取消。
+func TestAutomationIssuePolicyRejectsHistoricalPartialRetry(t *testing.T) {
+	// raw 是包含有效账号和动作计划的历史任务快照。
+	raw := `{"AccountID":"acc1","ActionPlan":[{"ActionType":"send_card"},{"ActionType":"confirm_shipment"}]}`
+	// kind、allowed 保存历史部分发送记录的恢复策略。
+	kind, allowed := automationIssuePolicy(raw, false, 0, true, 1, "历史版本补发失败")
+	if kind != "partial_failure" || len(allowed) != 1 || allowed[0] != "cancel" {
+		t.Fatalf("历史部分发送不应开放重试: kind=%q allowed=%v", kind, allowed)
+	}
+}
+
+// TestAutomationIssuePolicyRejectsManualReplayContinue 验证人工补发失败后不能用 continue 跳过确认发货动作。
+func TestAutomationIssuePolicyRejectsManualReplayContinue(t *testing.T) {
+	// raw 是包含卡密发送和确认发货动作的人工补发历史计划。
+	raw := `{"AccountID":"acc1","ActionPlan":[{"ActionType":"send_card"},{"ActionType":"confirm_shipment"}]}`
+	// kind、allowed 保存人工补发未知结果的恢复策略。
+	kind, allowed := automationIssuePolicy(raw, true, 1, true, 1, "人工补发失败，外部结果可能未知: 确认发货失败")
+	if kind != "external_result_unknown" || len(allowed) != 1 || allowed[0] != "cancel" {
+		t.Fatalf("人工补发失败不应开放 continue: kind=%q allowed=%v", kind, allowed)
+	}
+}
+
 // TestDeferTaskRevivesDeadLetterWithFreshAttemptBudget 封装TestDefer任务RevivesDeadLetterWithFresh尝试次数Budget业务协调。
 func TestDeferTaskRevivesDeadLetterWithFreshAttemptBudget(t *testing.T) {
 	// s、cleanup 用于本次流程后续判断的s、cleanup

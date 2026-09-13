@@ -45,6 +45,9 @@ type Config struct {
 	DeviceID    string // generate_device_id(myid)
 	AccessToken string // mtop token API 返回的 accessToken
 	Recorder    func(direction, rawText, parsedJSON, parseStatus, errMsg string)
+	// ObserveOutgoing 在 sendByReceiverScope 的成功响应同时携带可核验消息正文时同步接收非敏感观察结果。
+	// 回调运行在发起发送的调用方 goroutine，接收方不得阻塞、执行外部 I/O 或记录凭证。
+	ObserveOutgoing func(OutgoingEcho)
 }
 
 // Conn 包装一条已注册的 WebSocket 连接。

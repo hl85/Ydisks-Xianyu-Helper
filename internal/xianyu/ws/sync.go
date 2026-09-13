@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +16,43 @@ import (
 
 	"xianyu-go/internal/xianyu/protocol"
 )
+
+// OutgoingEcho 是平台 sendByReceiverScope 成功响应中可被严格核验的一条出站消息摘要。
+// 它不包含 Cookie、Token 或原始平台帧，只供账号运行时唤醒同一次自动化发送的确认等待器。
+type OutgoingEcho struct {
+	// RequestID 是本次 sendByReceiverScope 请求使用的 mid，用于把平台响应精确关联到发起请求。
+	RequestID string
+	// ChatID 是去除 IM 协议后缀后的平台会话标识。
+	ChatID string
+	// BuyerID 是本次发送时明确指定的会话对端平台标识。
+	BuyerID string
+	// MessageKey 是平台为已经接纳的消息分配的 PNM 标识。
+	MessageKey string
+	// MessageType 是与账号级回显等待器匹配的 text 或 image 类型。
+	MessageType string
+	// Text 是文本消息的规范正文；非文本消息保持空字符串。
+	Text string
+	// Content 是图片消息的首张 URL；非图片消息保持空字符串。
+	Content string
+}
+
+// outgoingRequestIDContextKey 保存发送调用要求使用的请求级 mid；仅由本包内部读取，避免改变公共发送方法签名。
+type outgoingRequestIDContextKey struct{}
+
+// WithOutgoingRequestID 将请求级 mid 放入发送上下文，使响应观察器可以精确关联并发的相同正文消息。
+func WithOutgoingRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, outgoingRequestIDContextKey{}, strings.TrimSpace(requestID))
+}
+
+// outgoingRequestID 从发送上下文读取调用方预先分配的请求级 mid；缺失时由请求层继续生成。
+func outgoingRequestID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	// requestID 保存上下文中的发送请求 mid；缺失或非字符串值按未提供处理。
+	requestID, _ := ctx.Value(outgoingRequestIDContextKey{}).(string)
+	return strings.TrimSpace(requestID)
+}
 
 // handleSyncExtra 处理服务端增量同步帧并在需要时回传确认，返回解码或发送错误。
 func (c *Conn) handleSyncExtra(ctx context.Context, msg map[string]any) error {
@@ -141,93 +179,8 @@ func (c *Conn) sendJSON(ctx context.Context, v any) error {
 	return c.ws.Write(ctx, websocket.MessageText, b)
 }
 
-// SendReceipt 是平台对一次聊天发送请求的受理凭证。
-// 它来自发送请求自身的响应体，与推送回显是两条独立证据链：
-// 平台在该请求的响应里为消息分配了 messageId 并回填了发送者身份，
-// 因此可据此确认「消息已进入平台会话」，无需依赖可能不出现的推送回显。
-type SendReceipt struct {
-	// MessageID 是平台为该条消息分配的消息 ID（形如 <数字>.PNM），为空表示响应未提供受理证据。
-	MessageID string
-	// SenderUserID 是平台回填的消息发送者账号身份，用于排除把他人消息误判为自身发送。
-	SenderUserID string
-	// Summary 是平台给出的消息摘要；图片等媒体可能为空。
-	Summary string
-	// CreateAt 是平台记录的消息创建时间（Unix 毫秒），不可解析时为 0。
-	CreateAt int64
-}
-
-// ConfirmsOwnMessage 判断凭证是否足以证明「当前账号的一条消息已被平台受理」。
-// 只有同时具备非空消息 ID 与自身发送者身份才算成立，避免用不完整响应自欺。
-func (r SendReceipt) ConfirmsOwnMessage(accountID string) bool {
-	// normalizedAccount 是去掉闲鱼协议后缀后的当前账号身份。
-	normalizedAccount := stripGoofish(accountID)
-	if strings.TrimSpace(r.MessageID) == "" || normalizedAccount == "" {
-		return false
-	}
-	return stripGoofish(r.SenderUserID) == normalizedAccount
-}
-
-// extractSendReceipt 从发送响应中提取平台受理凭证；缺失字段保持零值，由调用方决定是否采信。
-func extractSendReceipt(response map[string]any) SendReceipt {
-	// body 是平台发送响应正文；没有 body 时不存在受理证据。
-	body, _ := response["body"].(map[string]any)
-	if body == nil {
-		return SendReceipt{}
-	}
-	// receipt 保存归一化后的消息 ID、发送者身份与摘要。
-	receipt := SendReceipt{MessageID: normalizedTextValue(body["messageId"])}
-	// extension 是平台回填的消息展示扩展，携带发送者身份与摘要。
-	if extension, ok := body["extension"].(map[string]any); ok {
-		receipt.SenderUserID = normalizedTextValue(extension["senderUserId"])
-		receipt.Summary = normalizedTextValue(extension["reminderContent"])
-	}
-	receipt.CreateAt = numberInt64(body["createAt"])
-	return receipt
-}
-
-// normalizedTextValue 返回平台字段的文本形式；nil 与 "<nil>" 统一归为空串。
-func normalizedTextValue(value any) string {
-	if value == nil {
-		return ""
-	}
-	text := strings.TrimSpace(fmt.Sprint(value))
-	if text == "<nil>" {
-		return ""
-	}
-	return text
-}
-
-// numberInt64 把平台返回的数值字段规范为 int64；非整数或不可解析时返回 0。
-func numberInt64(value any) int64 {
-	switch typed := value.(type) {
-	case int:
-		return int64(typed)
-	case int64:
-		return typed
-	case float64:
-		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) {
-			return 0
-		}
-		return int64(typed)
-	case json.Number:
-		parsed, err := typed.Int64()
-		if err != nil {
-			return 0
-		}
-		return parsed
-	default:
-		return 0
-	}
-}
-
 // SendText 发送一条闲鱼聊天文本消息。
 func (c *Conn) SendText(ctx context.Context, myID, cid, toID, text string) error {
-	_, err := c.SendTextWithReceipt(ctx, myID, cid, toID, text)
-	return err
-}
-
-// SendTextWithReceipt 发送文本并返回平台受理凭证；凭证仅供调用方做自身消息确认，不参与日志输出。
-func (c *Conn) SendTextWithReceipt(ctx context.Context, myID, cid, toID, text string) (SendReceipt, error) {
 	// content 用于本次流程后续判断的内容
 	content := map[string]any{
 		"contentType": 1,
@@ -235,7 +188,7 @@ func (c *Conn) SendTextWithReceipt(ctx context.Context, myID, cid, toID, text st
 			"text": text,
 		},
 	}
-	return c.sendChatContentWithReceipt(ctx, myID, cid, toID, content)
+	return c.sendChatContent(ctx, myID, cid, toID, content)
 }
 
 // MarkChatRead 将当前会话的 PNM 消息 ID 上报为已读。
@@ -267,12 +220,6 @@ func (c *Conn) MarkChatRead(ctx context.Context, cid string, messageIDs []map[st
 
 // SendImage 发送一条闲鱼聊天图片消息。imageURL 应为闲鱼可访问的 CDN/公网 URL。
 func (c *Conn) SendImage(ctx context.Context, myID, cid, toID, imageURL string, width, height int) error {
-	_, err := c.SendImageWithReceipt(ctx, myID, cid, toID, imageURL, width, height)
-	return err
-}
-
-// SendImageWithReceipt 发送图片并返回平台受理凭证；语义与 SendTextWithReceipt 一致。
-func (c *Conn) SendImageWithReceipt(ctx context.Context, myID, cid, toID, imageURL string, width, height int) (SendReceipt, error) {
 	if width <= 0 {
 		width = 800
 	}
@@ -291,7 +238,7 @@ func (c *Conn) SendImageWithReceipt(ctx context.Context, myID, cid, toID, imageU
 			}},
 		},
 	}
-	return c.sendChatContentWithReceipt(ctx, myID, cid, toID, content)
+	return c.sendChatContent(ctx, myID, cid, toID, content)
 }
 
 // SendItemCard 发送一条个人会话商品卡片，载荷与闲鱼 PC IM contentType=7 协议保持一致。
@@ -314,33 +261,32 @@ func (c *Conn) SendItemCard(ctx context.Context, myID, cid, toID, itemID, title,
 	return c.sendChatContent(ctx, myID, cid, toID, content)
 }
 
-// sendChatContent 封装send聊天内容业务协调；丢弃受理凭证，供不关心确认细节的调用方使用。
+// sendChatContent 封装send聊天内容业务协调。
 func (c *Conn) sendChatContent(ctx context.Context, myID, cid, toID string, content any) error {
-	_, err := c.sendChatContentWithReceipt(ctx, myID, cid, toID, content)
-	return err
-}
-
-// sendChatContentWithReceipt 发送聊天内容并返回平台受理凭证；非 200 响应不产生可用凭证。
-func (c *Conn) sendChatContentWithReceipt(ctx context.Context, myID, cid, toID string, content any) (SendReceipt, error) {
 	// err 保存发送开始前的取消状态。
 	if err := ctx.Err(); err != nil {
-		return SendReceipt{}, &SendError{Kind: SendNotSent, Err: err}
+		return &SendError{Kind: SendNotSent, Err: err}
 	}
 	myID = stripGoofish(myID)
 	cid = stripGoofish(cid)
 	toID = stripGoofish(toID)
 	if myID == "" || cid == "" || toID == "" {
-		return SendReceipt{}, &SendError{Kind: SendNotSent, Err: fmt.Errorf("发送消息缺少必要参数")}
+		return &SendError{Kind: SendNotSent, Err: fmt.Errorf("发送消息缺少必要参数")}
 	}
 	// raw、err 用于本次流程后续判断的raw、err
 	raw, err := json.Marshal(content)
 	if err != nil {
-		return SendReceipt{}, &SendError{Kind: SendNotSent, Err: err}
+		return &SendError{Kind: SendNotSent, Err: err}
 	}
 	// encoded 用于本次流程后续判断的encoded
 	encoded := base64.StdEncoding.EncodeToString(raw)
+	// mid 保存一次平台发送使用的请求级标识；自动化调用由上层注入，相同请求链路必须复用它。
+	mid := outgoingRequestID(ctx)
+	if mid == "" {
+		mid = protocol.GenerateMid()
+	}
 	// headers 保存一次平台发送使用的 mid；请求确认必须使用同一个 mid。
-	headers := map[string]any{"mid": protocol.GenerateMid()}
+	headers := map[string]any{"mid": mid}
 	// body 保存与既有协议完全一致的消息载荷。
 	body := []any{
 		map[string]any{
@@ -375,21 +321,147 @@ func (c *Conn) sendChatContentWithReceipt(ctx context.Context, myID, cid, toID s
 	// response 保存平台对本次发送的确认；该请求不会额外创建连接或增加闲鱼调用次数。
 	response, err := c.request(ctx, "/r/MessageSend/sendByReceiverScope", headers, body, regResponseTimeout)
 	if err != nil {
-		return SendReceipt{}, &SendError{Kind: SendUncertain, Err: err}
+		return &SendError{Kind: SendUncertain, Err: err}
 	}
 	// code 和 ok 保存平台发送确认状态码及其严格可解析性。
 	code, ok := strictChatSendResponseCode(response["code"])
 	if !ok {
-		return SendReceipt{}, &SendError{Kind: SendUncertain, Code: code}
+		return &SendError{Kind: SendUncertain, Code: code}
 	}
 	if code == http.StatusOK {
-		// receipt 是平台在同一 mid 的响应里给出的受理凭证；字段缺失时为零值，由调用方决定是否采信。
-		return extractSendReceipt(response), nil
+		// 仅在响应中的平台正文与本次发送内容逐字节一致时观察自身回显，不能把裸 200 ACK 误当作投递确认。
+		c.observeOutgoingResponse(response, mid, myID, cid, toID, raw)
+		return nil
 	}
 	if code >= http.StatusBadRequest && code < http.StatusInternalServerError && code != http.StatusRequestTimeout {
-		return SendReceipt{}, &SendError{Kind: SendRejected, Code: code}
+		return &SendError{Kind: SendRejected, Code: code}
 	}
-	return SendReceipt{}, &SendError{Kind: SendUncertain, Code: code}
+	return &SendError{Kind: SendUncertain, Code: code}
+}
+
+// observeOutgoingResponse 将带有可核验正文的成功发送响应转换为账号运行时可消费的出站观察事件。
+// response 属于当前请求的同一 mid；myID、cid、toID 和 sentContent 是刚刚写入该请求的身份与正文快照。
+// 校验失败时保持旧的同步推送回显路径，绝不把未知响应当作自动化成功。
+func (c *Conn) observeOutgoingResponse(response map[string]any, requestID, myID, cid, toID string, sentContent []byte) {
+	if c == nil {
+		return
+	}
+	// observe 是当前连接配置的消费回调；在锁外调用以免观察器反向触发账号运行时锁竞争。
+	observe := c.cfg.ObserveOutgoing
+	if observe == nil {
+		return
+	}
+	// echo 和 ok 表示平台响应是否完整、归属正确且携带与本次请求完全一致的消息正文。
+	echo, ok := outgoingEchoFromResponse(response, requestID, myID, cid, toID, sentContent)
+	if !ok {
+		return
+	}
+	observe(echo)
+}
+
+// outgoingEchoFromResponse 严格验证 sendByReceiverScope 响应中的消息正文、发送者和 PNM ID。
+// 只有消息正文与本次请求的已编码载荷完全相同时才返回观察结果，防止并发响应或平台异常回包误唤醒等待器。
+func outgoingEchoFromResponse(response map[string]any, requestID, myID, cid, toID string, sentContent []byte) (OutgoingEcho, bool) {
+	// body 和 bodyOK 保存平台成功响应的业务主体；缺失主体的 200 仍只表示请求确认。
+	body, bodyOK := response["body"].(map[string]any)
+	if !bodyOK {
+		return OutgoingEcho{}, false
+	}
+	// messageKey 是平台接纳消息后分配的 PNM 标识；空值时无法把响应作为可审计回显。
+	messageKey := strings.TrimSpace(fmt.Sprint(body["messageId"]))
+	if messageKey == "" || messageKey == "<nil>" {
+		return OutgoingEcho{}, false
+	}
+	// extension 和 extensionOK 保存展示与归属字段；发送者必须与当前请求账号一致。
+	extension, extensionOK := body["extension"].(map[string]any)
+	if !extensionOK {
+		return OutgoingEcho{}, false
+	}
+	// senderID 是响应声明的出站发送者，统一移除 IM 后缀后与请求账号比较。
+	senderID := stripGoofish(fmt.Sprint(extension["senderUserId"]))
+	if senderID == "" || senderID != stripGoofish(myID) {
+		return OutgoingEcho{}, false
+	}
+	// responseContent 和 contentOK 保存平台回显的 101 外层内容；其中 custom.data 必须与本次原始正文一致。
+	responseContent, contentOK := body["content"].(map[string]any)
+	if !contentOK {
+		return OutgoingEcho{}, false
+	}
+	// custom 和 customOK 保存外层内容中的 Base64 编码内层消息正文。
+	custom, customOK := responseContent["custom"].(map[string]any)
+	if !customOK {
+		return OutgoingEcho{}, false
+	}
+	// encoded 是平台回显的内层消息正文；它必须可以解码并逐字节等于本次请求载荷。
+	encoded, encodedOK := custom["data"].(string)
+	if !encodedOK {
+		return OutgoingEcho{}, false
+	}
+	// echoedContent 和 decodeErr 保存回显正文的 Base64 解码结果及其格式错误。
+	echoedContent, decodeErr := base64.StdEncoding.DecodeString(encoded)
+	if decodeErr != nil || !bytes.Equal(echoedContent, sentContent) {
+		return OutgoingEcho{}, false
+	}
+	// messageType、text、content 和 parsed 表示仅支持自动化确认所需的文本或图片正文；其它类型继续等待正常同步推送。
+	messageType, text, content, parsed := outgoingEchoContent(sentContent)
+	if !parsed {
+		return OutgoingEcho{}, false
+	}
+	return OutgoingEcho{RequestID: strings.TrimSpace(requestID), ChatID: stripGoofish(cid), BuyerID: stripGoofish(toID), MessageKey: messageKey, MessageType: messageType, Text: text, Content: content}, true
+}
+
+// outgoingEchoContent 从已经验证的请求正文提取等待器的比较字段。
+// 返回 false 表示内容不是当前自动化确认支持的文本或单图消息，调用方必须保留同步推送回显的原有语义。
+func outgoingEchoContent(sentContent []byte) (messageType, text, content string, ok bool) {
+	// payload 保存发送时序列化的内层 JSON 正文。
+	var payload map[string]any
+	// decodeErr 是内层 JSON 正文的解析错误；解析失败时不能据此确认自动化投递。
+	if decodeErr := json.Unmarshal(sentContent, &payload); decodeErr != nil {
+		return "", "", "", false
+	}
+	// typeCode 和 typeOK 保存内层消息类型；只接受完整整数形式以避免兼容字段截断。
+	typeCode, typeOK := strictChatSendResponseCode(payload["contentType"])
+	if !typeOK {
+		return "", "", "", false
+	}
+	switch typeCode {
+	case 1:
+		// textBody 和 textOK 保存文字消息节点；空白文本不具备自动化确认价值。
+		textBody, textOK := payload["text"].(map[string]any)
+		if !textOK {
+			return "", "", "", false
+		}
+		// textValue 是需要与等待器严格比较的文本正文。
+		textValue := strings.TrimSpace(fmt.Sprint(textBody["text"]))
+		if textValue == "" || textValue == "<nil>" {
+			return "", "", "", false
+		}
+		return "text", textValue, "", true
+	case 2:
+		// image 和 imageOK 保存图片消息节点；当前自动化每次仅确认第一张上传后的远程图片。
+		image, imageOK := payload["image"].(map[string]any)
+		if !imageOK {
+			return "", "", "", false
+		}
+		// pictures 和 picturesOK 保存平台图片列表；空列表无法确认已投递的目标媒体。
+		pictures, picturesOK := image["pics"].([]any)
+		if !picturesOK || len(pictures) == 0 {
+			return "", "", "", false
+		}
+		// firstPicture 和 pictureOK 保存发送顺序中的第一张图片属性。
+		firstPicture, pictureOK := pictures[0].(map[string]any)
+		if !pictureOK {
+			return "", "", "", false
+		}
+		// imageURL 是图片回显等待器使用的稳定远程地址。
+		imageURL := strings.TrimSpace(fmt.Sprint(firstPicture["url"]))
+		if imageURL == "" || imageURL == "<nil>" {
+			return "", "", "", false
+		}
+		return "image", "", imageURL, true
+	default:
+		return "", "", "", false
+	}
 }
 
 // strictChatSendResponseCode 只接受完整整数形式的聊天发送状态码，避免截断浮点数或接受带尾随字符的字符串。

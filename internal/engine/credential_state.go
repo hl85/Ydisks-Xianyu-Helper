@@ -33,6 +33,8 @@ type credentialState struct {
 	lastTokenStatus string
 	// tokenFetchFailures 是当前连接周期内 Token 获取失败次数。
 	tokenFetchFailures int
+	// tokenImmediateRefreshes 是本轮连续 Token 失败期间已执行的即时凭证刷新次数；达到上限后必须退避，防止热循环。
+	tokenImmediateRefreshes int
 	// credentialFP 是当前 Cookie 与权威 Cookie Jar 的完整状态指纹。
 	credentialFP string
 	// tokenCredentialFP 是当前 Token 获取时绑定的凭证状态指纹。

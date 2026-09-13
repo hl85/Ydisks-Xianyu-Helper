@@ -130,7 +130,7 @@ func TestAccountTaskCoordinatorCoversSessionFingerprintBranches(t *testing.T) {
 	// sessionErr 是平台报告的 Session 失效错误。
 	sessionErr := errors.New("session expired")
 	// recoverErr 保存没有恢复器时的人工恢复错误。
-	recoverErr := recoverCoordinator.recoverAccountTaskSession(context.Background(), "account", sessionErr)
+	recoverErr := recoverCoordinator.recoverAccountTaskCredential(context.Background(), "account", sessionErr)
 	if !errors.Is(recoverErr, sessionErr) {
 		t.Fatalf("无恢复器错误=%v", recoverErr)
 	}

@@ -187,9 +187,15 @@ func (s *Scheduler) scan(ctx context.Context) {
 					ChatID: order.ChatID, OrderID: order.OrderID, ItemID: order.ItemID, BuyerID: order.BuyerID,
 					Text: "发货后一段时间未评价", Raw: map[string]any{"source": "scheduler", "rule_id": rule.ID,
 						"order_id": order.OrderID, "attempt": order.ReviewRequestCount + 1}}
-				if // err 用于本次流程后续判断的err
-				err := s.center.executeRule(ctx, task, rule); err != nil {
-					s.center.logger.Warn("求评价计划任务执行失败", "account", order.CookieID, "order_id", order.OrderID, "rule_id", rule.ID, "err", err)
+				// executeErr 保存求评价规则本轮执行的最终结果，用于区分成功、延期和失败。
+				executeErr := s.center.executeRule(ctx, task, rule)
+				switch {
+				case executeErr == nil:
+					s.center.logger.Info("求评价计划任务执行成功", "account", order.CookieID, "order_id", order.OrderID, "rule_id", rule.ID)
+				case errors.Is(executeErr, errAutomationDeferred):
+					s.center.logger.Info("求评价计划任务已延期，等待下一次执行", "account", order.CookieID, "order_id", order.OrderID, "rule_id", rule.ID)
+				default:
+					s.center.logger.Warn("求评价计划任务执行失败", "account", order.CookieID, "order_id", order.OrderID, "rule_id", rule.ID, "err", executeErr)
 				}
 			}
 		}
@@ -467,10 +473,16 @@ func (s *Scheduler) runRecoveryTasks(ctx context.Context) error {
 		}
 		task.Raw["automation_run_id"] = run.ID
 		task.Raw["automation_rule_id"] = run.RuleID
-		if // err 用于本次流程后续判断的err
-		err := s.center.executeRule(ctx, task, *rule); err != nil && !errors.Is(err, errAutomationDeferred) {
-			s.center.logger.Warn("重试自动化运行失败", "run_id", run.ID, "err", err)
-			resultErr = errors.Join(resultErr, err)
+		// executeErr 保存恢复运行本轮执行的最终结果，用于区分成功、延期和失败。
+		executeErr := s.center.executeRule(ctx, task, *rule)
+		switch {
+		case executeErr == nil:
+			s.center.logger.Info("自动化恢复任务执行成功", "run_id", run.ID, "account", task.AccountID, "order_id", task.OrderID)
+		case errors.Is(executeErr, errAutomationDeferred):
+			s.center.logger.Info("自动化恢复任务已延期，等待下一次执行", "run_id", run.ID, "account", task.AccountID, "order_id", task.OrderID)
+		default:
+			s.center.logger.Warn("重试自动化运行失败", "run_id", run.ID, "err", executeErr)
+			resultErr = errors.Join(resultErr, executeErr)
 		}
 	}
 	return resultErr
@@ -478,9 +490,11 @@ func (s *Scheduler) runRecoveryTasks(ctx context.Context) error {
 
 // quarantineRunForReview 将恢复运行置为人工核对并发送运维通知；写入失败时返回统一 needs_review 错误，禁止调用方误认为状态已收口。
 func (s *Scheduler) quarantineRunForReview(ctx context.Context, run db.AutomationRun, reason string) error {
-	// quarantineErr 表示人工核对状态写入失败；失败时数据库中的原状态仍可能允许下一轮恢复。
-	quarantineErr := s.center.store.Automation.QuarantineRun(ctx, run.ID, run.AttemptCount, reason)
-	s.center.notifyRunNeedsReview(ctx, run, reason)
+	// quarantined、quarantineErr 表示扫描快照仍有效并已隔离及写入错误；陈旧扫描不能覆盖续租或发送完成后的状态。
+	quarantined, quarantineErr := s.center.store.Automation.QuarantineRecoveryRun(ctx, run, reason)
+	if quarantined {
+		s.center.notifyRunNeedsReview(ctx, run, reason)
+	}
 	if quarantineErr == nil {
 		return nil
 	}
@@ -535,6 +549,8 @@ func (s *Scheduler) runDeferredTasks(ctx context.Context) error {
 					errAutomationNeedsReview,
 					fmt.Errorf("保存解析失败的暂停事件状态失败: %w", finishErr),
 				)
+			} else {
+				s.center.logger.Warn("暂停期间自动化事件重放失败", "task_id", pending.ID, "account", pending.CookieID, "err", err)
 			}
 			continue
 		}
@@ -546,12 +562,20 @@ func (s *Scheduler) runDeferredTasks(ctx context.Context) error {
 		deferredAgain, runErr := s.center.handleTask(ctx, task)
 		if deferredAgain {
 			// handleTask 已按新的 paused_until 重置同一任务；当前 claim 不再删除。
+			s.center.logger.Info("暂停期间自动化事件重放再次延期", "task_id", pending.ID, "account", task.AccountID, "trigger", task.TriggerType)
 			continue
 		}
-		if // err 用于本次流程后续判断的err
-		err := s.center.store.Automation.FinishDeferredTask(ctx, pending.ID, pending.ClaimVersion, runErr == nil, errorString(runErr)); err != nil {
-			s.center.logger.Warn("保存暂停事件重放结果失败", "task_id", pending.ID, "err", err)
-			resultErr = errors.Join(resultErr, errAutomationNeedsReview, runErr, fmt.Errorf("保存暂停事件重放结果失败: %w", err))
+		// finishErr 保存暂停事件重放终态的持久化错误；只有它成功后才记录重放成功或失败。
+		finishErr := s.center.store.Automation.FinishDeferredTask(ctx, pending.ID, pending.ClaimVersion, runErr == nil, errorString(runErr))
+		if finishErr != nil {
+			s.center.logger.Warn("保存暂停事件重放结果失败", "task_id", pending.ID, "err", finishErr)
+			resultErr = errors.Join(resultErr, errAutomationNeedsReview, runErr, fmt.Errorf("保存暂停事件重放结果失败: %w", finishErr))
+			continue
+		}
+		if runErr == nil {
+			s.center.logger.Info("暂停期间自动化事件重放成功", "task_id", pending.ID, "account", task.AccountID, "trigger", task.TriggerType)
+		} else {
+			s.center.logger.Warn("暂停期间自动化事件重放失败", "task_id", pending.ID, "account", task.AccountID, "trigger", task.TriggerType, "err", runErr)
 		}
 	}
 	return resultErr

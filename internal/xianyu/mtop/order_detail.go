@@ -67,7 +67,7 @@ func (c *ClientImpl) FetchOrderDetail(ctx context.Context, cookiesStr, orderID s
 		if attempt == 3 {
 			break
 		}
-		if currentCookies == previousCookies {
+		if !mtopTokenCookieChanged(previousCookies, currentCookies) {
 			// refreshed、refreshErr 用于本次流程后续判断的refreshed、refreshErr
 			refreshed, refreshErr := c.RefreshTokenContext(ctx, currentCookies)
 			if refreshErr != nil {

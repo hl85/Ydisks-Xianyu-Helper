@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,9 @@ type accountTaskFlowRepository struct {
 	// markRateErr、markPolishErr 保存扫描时间和擦亮日期写入错误。
 	markRateErr   error
 	markPolishErr error
+	// markPolishCalls、markPolishDate 保存擦亮日期成功写入的调用次数和日期。
+	markPolishCalls int
+	markPolishDate  string
 	// runtimeData、runtimeDataErr 保存凭证指纹读取结果和错误。
 	runtimeData    db.CookieRuntimeData
 	runtimeDataErr error
@@ -77,8 +81,12 @@ func (repository *accountTaskFlowRepository) MarkRateScan(context.Context, strin
 	return repository.markRateErr
 }
 
-// MarkPolished 返回测试预置的擦亮日期写入错误。
-func (repository *accountTaskFlowRepository) MarkPolished(context.Context, string, string, int64) error {
+// MarkPolished 返回测试预置的擦亮日期写入错误，并记录成功写入的调用。
+func (repository *accountTaskFlowRepository) MarkPolished(_ context.Context, _ string, date string, _ int64) error {
+	if repository.markPolishErr == nil {
+		repository.markPolishCalls++
+		repository.markPolishDate = date
+	}
 	return repository.markPolishErr
 }
 
@@ -107,6 +115,34 @@ type accountTaskRecovererBoundary struct {
 // RecoverExpiredCredential 返回预置的会话恢复接受结果。
 func (recoverer accountTaskRecovererBoundary) RecoverExpiredCredential(context.Context, string) bool {
 	return recoverer.success
+}
+
+// accountTaskCookieRotatingRecoverer 在恢复回调中更新测试仓储的签名 Cookie，用于覆盖续期后凭证版本核验。
+type accountTaskCookieRotatingRecoverer struct {
+	// repository 保存恢复回调要更新的测试凭证仓储。
+	repository *accountTaskFlowRepository
+	// value 是恢复后写入的 MTOP 签名 Cookie。
+	value string
+}
+
+// RecoverExpiredCredential 写入预置的恢复后 Cookie 并返回成功，模拟协议续期回调。
+func (recoverer accountTaskCookieRotatingRecoverer) RecoverExpiredCredential(context.Context, string) bool {
+	recoverer.repository.runtimeData.Value = recoverer.value
+	return true
+}
+
+// accountTaskCredentialReadFailingRecoverer 在恢复回调成功后让凭证读取失败，用于覆盖后态证据缺失。
+type accountTaskCredentialReadFailingRecoverer struct {
+	// repository 保存恢复回调要切换读取状态的测试仓储。
+	repository *accountTaskFlowRepository
+	// readErr 是恢复完成后凭证读取返回的底层错误。
+	readErr error
+}
+
+// RecoverExpiredCredential 返回成功但使恢复后凭证不可读，验证调用方不会报告假恢复。
+func (recoverer accountTaskCredentialReadFailingRecoverer) RecoverExpiredCredential(context.Context, string) bool {
+	recoverer.repository.runtimeDataErr = recoverer.readErr
+	return true
 }
 
 // FetchPendingRateOrders 返回测试预置的待评价订单。
@@ -281,8 +317,18 @@ func TestAccountTaskPolishCoversClaimFetchAndOutcomeBranches(t *testing.T) {
 	emptyCoordinator := newAccountTaskFlowCoordinator(emptyRepository, &accountTaskFlowClient{itemResult: &mtop.ItemListResult{}})
 	// emptySummary、emptyErr 保存空商品列表结果。
 	emptySummary, emptyErr := emptyCoordinator.runAutoPolish(context.Background(), settings, time.Now(), true)
-	if emptyErr != nil || emptySummary.Found != 0 || emptySummary.Message == "" {
+	if emptyErr != nil || emptySummary.Found != 0 || emptySummary.Success != 0 || emptySummary.Failed != 0 || emptySummary.Message == "" || emptyRepository.markPolishCalls != 1 {
 		t.Fatalf("空商品列表结果=%+v err=%v", emptySummary, emptyErr)
+	}
+	// markPolishErr 是空列表成功态写入当日完成标记失败的底层错误。
+	markPolishErr := errors.New("mark polish date failed")
+	// markErrorRepository 保存当日完成标记写入失败的仓储。
+	markErrorRepository := &accountTaskFlowRepository{immediateClaimed: true, value: "cookie", markPolishErr: markPolishErr}
+	// markErrorCoordinator 保存空列表完成标记写入失败的擦亮协调器。
+	markErrorCoordinator := newAccountTaskFlowCoordinator(markErrorRepository, &accountTaskFlowClient{itemResult: &mtop.ItemListResult{}})
+	// markResultErr 保存空列表完成标记写入错误。
+	if _, markResultErr := markErrorCoordinator.runAutoPolish(context.Background(), settings, time.Now(), true); !errors.Is(markResultErr, markPolishErr) {
+		t.Fatalf("空列表完成标记写入错误=%v", markResultErr)
 	}
 	// failedRepository 保存商品擦亮失败后正常记录 failed 状态的仓储。
 	failedRepository := &accountTaskFlowRepository{immediateClaimed: true, value: "cookie"}
@@ -331,8 +377,58 @@ func TestAccountTaskCoordinatorCoversPropagationAndRecoveryBranches(t *testing.T
 	// sessionError 是平台报告的会话过期错误。
 	sessionError := errors.New("session expired")
 	// recoveryErr 保存恢复成功后的提示错误，原始会话错误仍应可识别。
-	recoveryErr := recoveryCoordinator.recoverAccountTaskSession(context.Background(), "account", sessionError)
-	if !errors.Is(recoveryErr, sessionError) {
+	recoveryErr := recoveryCoordinator.recoverAccountTaskCredential(context.Background(), "account", sessionError)
+	if !errors.Is(recoveryErr, sessionError) || !errors.Is(recoveryErr, errAccountTaskCredentialRenewed) {
 		t.Fatalf("会话恢复错误=%v", recoveryErr)
+	}
+	// tokenCoordinator 保存协议续期只返回成功但未轮换签名 Cookie 的测试协调器。
+	tokenCoordinator := newAccountTaskFlowCoordinator(&accountTaskFlowRepository{
+		runtimeData: db.CookieRuntimeData{Value: "unb=1; _m_h5_tk=old_token"},
+	}, &accountTaskFlowClient{})
+	tokenCoordinator.recoverer = func() CredentialRecoverer { return accountTaskRecovererBoundary{success: true} }
+	// tokenError 是平台报告的 MTOP 签名 Token 过期错误。
+	tokenError := &mtop.MTopResponseError{API: "评价接口", Kind: mtop.MTopErrorTokenExpired, HTTPStatus: 200}
+	// tokenRecoveryErr 保存未轮换签名 Cookie 时拒绝误报成功的结果。
+	tokenRecoveryErr := tokenCoordinator.recoverAccountTaskCredential(context.Background(), "account", tokenError)
+	if !errors.Is(tokenRecoveryErr, tokenError) || !strings.Contains(tokenRecoveryErr.Error(), "未轮换 MTOP 签名 Cookie") {
+		t.Fatalf("未轮换签名 Cookie 不应报告 Token 恢复成功: %v", tokenRecoveryErr)
+	}
+	// expiryRepository 保存只更新 _m_h5_tk 时间后缀的凭证，验证它不会被误判为签名轮换。
+	expiryRepository := &accountTaskFlowRepository{runtimeData: db.CookieRuntimeData{Value: "unb=1; _m_h5_tk=old_token_100"}}
+	// expiryCoordinator 使用会把时间后缀更新为 200 的恢复回调。
+	expiryCoordinator := newAccountTaskFlowCoordinator(expiryRepository, &accountTaskFlowClient{})
+	expiryCoordinator.recoverer = func() CredentialRecoverer {
+		return accountTaskCookieRotatingRecoverer{repository: expiryRepository, value: "unb=1; _m_h5_tk=old_token_200"}
+	}
+	// expiryRecoveryErr 保存仅令牌时间后缀变化时的恢复结果。
+	expiryRecoveryErr := expiryCoordinator.recoverAccountTaskCredential(context.Background(), "account", tokenError)
+	if !errors.Is(expiryRecoveryErr, tokenError) || !strings.Contains(expiryRecoveryErr.Error(), "未轮换 MTOP 签名 Cookie") {
+		t.Fatalf("仅更新令牌时间后缀不应报告 Token 恢复成功: %v", expiryRecoveryErr)
+	}
+	// preReadErr 是续期前读取签名 Cookie 失败的底层错误，恢复回调成功也不能替代该证据。
+	preReadErr := errors.New("续期前 Cookie 读取失败")
+	// preReadRepository 保存无法提供续期前 Token 的测试仓储。
+	preReadRepository := &accountTaskFlowRepository{runtimeDataErr: preReadErr}
+	// preReadCoordinator 验证恢复前态读取失败不会被报告为 Token 已恢复。
+	preReadCoordinator := newAccountTaskFlowCoordinator(preReadRepository, &accountTaskFlowClient{})
+	preReadCoordinator.recoverer = func() CredentialRecoverer { return accountTaskRecovererBoundary{success: true} }
+	// preReadRecoveryErr 保存前态读取失败时的恢复结果，必须同时保留平台错误和存储错误。
+	preReadRecoveryErr := preReadCoordinator.recoverAccountTaskCredential(context.Background(), "account", tokenError)
+	if !errors.Is(preReadRecoveryErr, tokenError) || !errors.Is(preReadRecoveryErr, preReadErr) || strings.Contains(preReadRecoveryErr.Error(), "续期成功") {
+		t.Fatalf("续期前无法读取签名 Cookie 不应报告 Token 恢复成功: %v", preReadRecoveryErr)
+	}
+	// postReadErr 是续期后读取签名 Cookie 失败的底层错误，错误文本与错误链都必须保留。
+	postReadErr := errors.New("续期后 Cookie 读取失败")
+	// postReadRepository 保存续期前可读、续期后由恢复器切换为不可读的测试仓储。
+	postReadRepository := &accountTaskFlowRepository{runtimeData: db.CookieRuntimeData{Value: "unb=1; _m_h5_tk=old_token"}}
+	// postReadCoordinator 验证恢复后态读取失败不会被报告为 Token 已恢复。
+	postReadCoordinator := newAccountTaskFlowCoordinator(postReadRepository, &accountTaskFlowClient{})
+	postReadCoordinator.recoverer = func() CredentialRecoverer {
+		return accountTaskCredentialReadFailingRecoverer{repository: postReadRepository, readErr: postReadErr}
+	}
+	// postReadRecoveryErr 保存恢复后读取失败时的结果，必须同时保留平台错误和存储错误。
+	postReadRecoveryErr := postReadCoordinator.recoverAccountTaskCredential(context.Background(), "account", tokenError)
+	if !errors.Is(postReadRecoveryErr, tokenError) || !errors.Is(postReadRecoveryErr, postReadErr) || strings.Contains(postReadRecoveryErr.Error(), "续期成功") {
+		t.Fatalf("续期后无法读取签名 Cookie 不应报告 Token 恢复成功: %v", postReadRecoveryErr)
 	}
 }

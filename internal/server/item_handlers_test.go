@@ -739,6 +739,60 @@ func TestSyncItemsFromAccountSuccess(t *testing.T) {
 	}
 }
 
+// TestSyncItemsFromAccountTreatsMissingCardListAsEmpty 验证无商品账号的真实成功结构不会被映射为 502，且会清理本地过期商品。
+func TestSyncItemsFromAccountTreatsMissingCardListAsEmpty(t *testing.T) {
+	// srv、store、cleanup 保存真实 HTTP 同步链路所需的测试服务、存储和释放函数。
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	// ctx 保存准备本地旧商品时使用的数据库上下文。
+	ctx := context.Background()
+	// upsertErr 保存写入待同步清理的本地旧商品时产生的错误。
+	upsertErr := store.Items.Upsert(ctx, &db.ItemInfoRow{CookieID: "acc1", ItemID: "stale-item", ItemTitle: "已下架商品"})
+	if upsertErr != nil {
+		t.Fatal(upsertErr)
+	}
+	// previousClient 保存测试前的 MTOP 客户端，结束后必须恢复以隔离其他 HTTP 测试。
+	previousClient := testMTop(srv)
+	// emptyListTransport 返回闲鱼现场验证的无商品成功结构，不提供 cardList 字段。
+	emptyListTransport := withMTopTransport(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		// body 保存不含商品卡片但总数明确为零的平台成功响应。
+		body := `{"ret":["SUCCESS::调用成功"],"data":{"totalCount":0,"itemTopicList":[],"nextPage":false}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	}))
+	setTestMTop(srv, emptyListTransport)
+	defer func() { setTestMTop(srv, previousClient) }()
+	// handler 保存当前服务路由，供认证后的商品同步请求使用。
+	handler := srv.Router()
+	// sessionCookie 保存管理员登录后访问受保护同步路由所需的会话 Cookie。
+	sessionCookie := loginHelper(t, handler)
+	// request 保存触发商品全量同步的版本化 HTTP 请求。
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/items/get-all-from-account", strings.NewReader(`{"cookie_id":"acc1","page_size":20}`))
+	request.AddCookie(sessionCookie)
+	// recorder 保存同步处理器返回的统一 HTTP 响应。
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("无商品同步状态=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	// response 保存版本化同步接口的业务结果，用于确认本地旧商品已按空全集对齐。
+	var response struct {
+		// SavedCount 保存本次从远端空全集新增或更新的商品数量。
+		SavedCount int `json:"saved_count"`
+		// DeletedCount 保存本次软删除的本地旧商品数量。
+		DeletedCount int `json:"deleted_count"`
+	}
+	// decodeErr 保存 HTTP JSON 响应解析错误。
+	decodeErr := json.Unmarshal(recorder.Body.Bytes(), &response)
+	if decodeErr != nil || response.SavedCount != 0 || response.DeletedCount != 1 {
+		t.Fatalf("无商品同步结果异常: response=%+v err=%v", response, decodeErr)
+	}
+	// items、itemsErr 保存空全集同步后的本地商品列表及查询错误。
+	items, itemsErr := store.Items.AllForCookie(ctx, "acc1")
+	if itemsErr != nil || len(items) != 0 {
+		t.Fatalf("本地旧商品未按空全集清理: items=%+v err=%v", items, itemsErr)
+	}
+}
+
 // TestSyncItemsFromAccountReleasesCredentialLockDuringRemoteCall 验证商品远端同步期间不会占用账号凭证锁。
 func TestSyncItemsFromAccountReleasesCredentialLockDuringRemoteCall(t *testing.T) {
 	// srv、store、cleanup 用于本次流程后续判断的srv、store、cleanup

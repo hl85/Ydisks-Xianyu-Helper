@@ -62,7 +62,7 @@ func TestPendingShipOrdersWithoutPaidRunAfterReturnsUntouchedOrders(t *testing.T
 	userID, cookieID := seedAccount(t, s)
 	seedCatchupRule(t, s, userID, cookieID, "item-1", "发货规则", true,
 		[]AutomationActionInput{{ActionType: "send_card", MessageTemplate: "card", Enabled: true}})
-	seedCatchupOrder(t, s, "o-100", cookieID, "item-1", "chat-100", "pending_ship")	// candidates 保存本轮兜底扫描结果。
+	seedCatchupOrder(t, s, "o-100", cookieID, "item-1", "chat-100", "pending_ship") // candidates 保存本轮兜底扫描结果。
 	candidates, err := s.Automation.PendingShipOrdersWithoutPaidRunAfter(ctx, "", 200)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +241,7 @@ func TestPendingShipResumableRunsAfterOnlySelectsIdempotentTail(t *testing.T) {
 			status, attempt, cursor, runID); updateErr != nil {
 			t.Fatalf("改写运行夹具失败: %v", updateErr)
 		}
-	}	// 符合条件与三类排除条件分别落库。
+	} // 符合条件与三类排除条件分别落库。
 	updateRun(resumableRunID, "needs_review", 1, 1)
 	updateRun(cardPendingRunID, "needs_review", 1, 0)
 	updateRun(runningRunID, "running", 1, 1)

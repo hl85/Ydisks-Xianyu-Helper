@@ -62,19 +62,27 @@ func (c *outgoingMessageCoordinator) sendText(ctx context.Context, chatID, toUse
 	if err := c.acquireSendSlot(ctx); err != nil {
 		return err
 	}
-	// echoWaiter 必须在平台写入前登记，防止闲鱼回显先到而错过确认窗口。
-	echoWaiter := c.registerOutgoingEcho(ctx, chatID, toUserID, "text", text)
 	// sendCtx、cancel 限制单次文本发送的最长等待，并在函数返回时释放计时器。
 	sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	// receipt、err 是平台受理凭证与发送失败原因；凭证取自发送请求自身的响应，与推送回显互为独立证据链。
-	receipt, err := sendTextWithReceipt(conn, sendCtx, myID, chatID, toUserID, text)
-	if err != nil {
-		echoWaiter.cancel()
-		return classifyPlatformSendError(err)
+	// requestID 是本次平台请求的 mid；自动化回显确认必须沿发送上下文复用它。
+	requestID := protocol.GenerateMid()
+	// echoWaiter 必须在平台写入前登记，防止闲鱼回显先到而错过确认窗口。
+	echoWaiter := c.registerOutgoingEcho(ctx, chatID, toUserID, "text", text, requestID)
+	if echoWaiter != nil {
+		sendCtx = ws.WithOutgoingRequestID(sendCtx, requestID)
 	}
-	// 平台响应已给出可信受理凭证时立即确认，不再依赖可能不出现的推送回显。
-	confirmEchoWithReceipt(echoWaiter, receipt, myID)
+	// err 是平台文本发送失败原因；此时调用方按是否确定未发送决定重试或人工核对。
+	if err := conn.SendText(sendCtx, myID, chatID, toUserID, text); err != nil {
+		// classified 保存按平台结果分类后的发送错误，供回显保护策略判断。
+		classified := classifyPlatformSendError(err)
+		if errors.Is(classified, automation.ErrMessageNotSent) {
+			echoWaiter.cancelWithoutLateProtection()
+		} else {
+			echoWaiter.cancel()
+		}
+		return classified
+	}
 	// err 是自身回显确认失败原因；失败时必须把发送结果交给上层人工核对。
 	if err := c.confirmOutgoingEcho(ctx, echoWaiter, chatID); err != nil {
 		return err
@@ -117,58 +125,55 @@ func (c *outgoingMessageCoordinator) sendImage(ctx context.Context, chatID, toUs
 	if err := c.acquireSendSlot(ctx); err != nil {
 		return err
 	}
-	// echoWaiter 必须在图片写入前登记；图片回显使用平台返回的同类媒体正文进行匹配。
-	echoWaiter := c.registerOutgoingEcho(ctx, chatID, toUserID, "image", imageURL)
 	// sendCtx、cancel 限制单次图片发送的最长等待，并在函数返回时释放计时器。
 	sendCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	_ = cardID // cardID 由上层动作检查点持久化，协议图片发送本身不携带该字段。
-	// receipt、err 是平台受理凭证与发送失败原因；图片与文本共用同一条确认路径。
-	receipt, err := sendImageWithReceipt(conn, sendCtx, myID, chatID, toUserID, imageURL, width, height)
-	if err != nil {
-		echoWaiter.cancel()
-		return classifyPlatformSendError(err)
+	// requestID 是本次平台图片请求的 mid；自动化回显确认必须沿发送上下文复用它。
+	requestID := protocol.GenerateMid()
+	// echoWaiter 必须在图片写入前登记；图片回显使用平台返回的同类媒体正文进行匹配。
+	echoWaiter := c.registerOutgoingEcho(ctx, chatID, toUserID, "image", imageURL, requestID)
+	if echoWaiter != nil {
+		sendCtx = ws.WithOutgoingRequestID(sendCtx, requestID)
 	}
-	confirmEchoWithReceipt(echoWaiter, receipt, myID)
+	_ = cardID // cardID 由上层动作检查点持久化，协议图片发送本身不携带该字段。
+	if err := conn.SendImage(sendCtx, myID, chatID, toUserID, imageURL, width, height); err != nil {
+		// classified 保存按平台结果分类后的图片发送错误，供回显保护策略判断。
+		classified := classifyPlatformSendError(err)
+		if errors.Is(classified, automation.ErrMessageNotSent) {
+			echoWaiter.cancelWithoutLateProtection()
+		} else {
+			echoWaiter.cancel()
+		}
+		return classified
+	}
 	return c.confirmOutgoingEcho(ctx, echoWaiter, chatID)
 }
 
-// sendTextWithReceipt 优先使用带平台受理凭证的文本发送；连接未实现该可选能力时退回原有发送语义。
-func sendTextWithReceipt(conn WSConn, ctx context.Context, myID, chatID, toUserID, text string) (ws.SendReceipt, error) {
-	// sender、supported 表示当前连接是否提供平台发送受理凭证。
-	if sender, supported := conn.(interface {
-		SendTextWithReceipt(context.Context, string, string, string, string) (ws.SendReceipt, error)
-	}); supported {
-		return sender.SendTextWithReceipt(ctx, myID, chatID, toUserID, text)
-	}
-	return ws.SendReceipt{}, conn.SendText(ctx, myID, chatID, toUserID, text)
-}
-
-// sendImageWithReceipt 优先使用带平台受理凭证的图片发送；连接未实现该可选能力时退回原有发送语义。
-func sendImageWithReceipt(conn WSConn, ctx context.Context, myID, chatID, toUserID, imageURL string, width, height int) (ws.SendReceipt, error) {
-	// sender、supported 表示当前连接是否提供平台发送受理凭证。
-	if sender, supported := conn.(interface {
-		SendImageWithReceipt(context.Context, string, string, string, string, int, int) (ws.SendReceipt, error)
-	}); supported {
-		return sender.SendImageWithReceipt(ctx, myID, chatID, toUserID, imageURL, width, height)
-	}
-	return ws.SendReceipt{}, conn.SendImage(ctx, myID, chatID, toUserID, imageURL, width, height)
-}
-
-// confirmEchoWithReceipt 在平台受理凭证可信时直接确认等待项；凭证不可信时保持原有推送回显等待语义。
-func confirmEchoWithReceipt(waiter *outgoingEchoWaiter, receipt ws.SendReceipt, accountID string) {
-	if waiter == nil || !receipt.ConfirmsOwnMessage(accountID) {
-		return
-	}
-	waiter.confirm()
-}
-
 // registerOutgoingEcho 按调用上下文决定是否登记自动化出站回显确认；普通人工聊天保持原有非阻塞旁路。
-func (c *outgoingMessageCoordinator) registerOutgoingEcho(ctx context.Context, chatID, buyerID, messageType, content string) *outgoingEchoWaiter {
+func (c *outgoingMessageCoordinator) registerOutgoingEcho(ctx context.Context, chatID, buyerID, messageType, content, requestID string) *outgoingEchoWaiter {
 	if c == nil || c.echoTracker == nil || !wantsOutgoingEchoConfirmation(ctx) {
 		return nil
 	}
-	return c.echoTracker.register(chatID, buyerID, messageType, content)
+	return c.echoTracker.register(chatID, buyerID, messageType, content, requestID)
+}
+
+// observePlatformSendResponse 接收 WebSocket 发送成功响应中经过正文与身份核验的自身消息。
+// 它只唤醒同账号的自动化确认等待项，不持久化、不广播且不执行外部 I/O；正常同步推送仍会沿既有分发路径处理。
+func (c *outgoingMessageCoordinator) observePlatformSendResponse(echo ws.OutgoingEcho) {
+	if c == nil || c.echoTracker == nil {
+		return
+	}
+	// observed 保存适配为引擎内部等待键的非敏感回显摘要；响应已由 ws 层验证消息正文与发送者归属。
+	observed := OutgoingChatMessage{
+		ChatID:      echo.ChatID,
+		BuyerID:     echo.BuyerID,
+		RequestID:   echo.RequestID,
+		MessageKey:  echo.MessageKey,
+		MessageType: echo.MessageType,
+		Text:        echo.Text,
+		Content:     echo.Content,
+	}
+	c.echoTracker.observePlatform(observed)
 }
 
 // confirmOutgoingEcho 等待有限时间的自身回显；超时必须返回不确定错误，禁止自动化安全重试。
@@ -203,10 +208,6 @@ func (c *outgoingMessageCoordinator) sendItemCard(ctx context.Context, chatID, t
 	conn, myID, stateErr := c.currentSenderState()
 	if stateErr != nil {
 		return stateErr
-	}
-	// 连接就绪后先过发送闸门：商品卡片同样计入账号额度与发送节奏。
-	if err := c.acquireSendSlot(ctx); err != nil {
-		return err
 	}
 	// itemSender 和 supported 表示当前连接是否支持商品卡片扩展协议。
 	itemSender, supported := conn.(interface {

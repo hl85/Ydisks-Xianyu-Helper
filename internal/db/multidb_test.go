@@ -1113,7 +1113,12 @@ func TestMultiDB_OrdersUpsertManyMixedCreatedAt(t *testing.T) {
 			if emptyExistingErr != nil || emptyNewErr != nil || explicitNewErr != nil {
 				t.Fatalf("读取混合批次失败: %v/%v/%v", emptyExistingErr, emptyNewErr, explicitNewErr)
 			}
-			if emptyExisting.CreatedAt != "" || emptyNew.CreatedAt == "" || explicitNew.CreatedAt != "2024-02-01T00:00:00Z" {
+			// explicitTime、timeErr 将驱动返回的时间解析为 UTC 时刻；断言业务时间而非驱动字符串格式。
+			explicitTime, timeErr := time.Parse(time.RFC3339Nano, explicitNew.CreatedAt)
+			if timeErr != nil {
+				explicitTime, timeErr = time.ParseInLocation("2006-01-02 15:04:05", explicitNew.CreatedAt, time.UTC)
+			}
+			if emptyExisting.CreatedAt != "" || emptyNew.CreatedAt == "" || timeErr != nil || !explicitTime.Equal(time.Date(2024, time.February, 1, 0, 0, 0, 0, time.UTC)) {
 				t.Fatalf("三方言 CreatedAt 语义不一致: emptyExisting=%q emptyNew=%q explicitNew=%q", emptyExisting.CreatedAt, emptyNew.CreatedAt, explicitNew.CreatedAt)
 			}
 		})

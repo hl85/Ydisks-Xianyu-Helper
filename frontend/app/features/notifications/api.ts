@@ -2,6 +2,7 @@ import type { MutationIDResponse,NotificationBinding,NotificationChannel,Notific
 import { normalizeSystemSettingsUpdate } from '../../../shared/api-contract/settings';
 import { type RequestControlOptions } from '../../../shared/http/client';
 import { contractClient, runContractRequest } from '../../../shared/api-contract/client';
+import { normalizeNotificationEventTypes } from './models';
 export type * from './models';
 
 /** 通知渠道写入时使用的具名请求 DTO。 */
@@ -22,16 +23,16 @@ export interface NotificationChannelRequest {
 
 /** 将后端字符串或历史分隔文本转换为稳定事件类型列表。 */
 const parseNotificationEventTypes = (raw: unknown): NotificationEventType[] => {
-  if (Array.isArray(raw)) return raw.filter(Boolean) as NotificationEventType[];
+  if (Array.isArray(raw)) return normalizeNotificationEventTypes(raw.filter(Boolean) as NotificationEventType[]);
   if (typeof raw !== 'string' || !raw.trim()) return [];
   try {
     // parsed 是解析后的历史 JSON 事件列表。
     const parsed: unknown = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed.filter(Boolean) as NotificationEventType[];
+    if (Array.isArray(parsed)) return normalizeNotificationEventTypes(parsed.filter(Boolean) as NotificationEventType[]);
   } catch {
     // 非 JSON 历史值继续按分隔符兼容解析。
   }
-  return raw.split(/[,\s;]+/).map(value => value.trim()).filter(Boolean) as NotificationEventType[];
+  return normalizeNotificationEventTypes(raw.split(/[,\s;]+/).map(value => value.trim()).filter(Boolean) as NotificationEventType[]);
 };
 
 /** 将事件类型列表序列化为后端稳定保存的 JSON 文本。 */

@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+// accountTaskMaxRetries 是账号自动任务在首次执行失败后允许继续尝试的最大次数。
+const accountTaskMaxRetries = 5
+
+// accountTaskMaxAttempts 是包含首次执行在内的账号自动任务最大执行次数。
+const accountTaskMaxAttempts = accountTaskMaxRetries + 1
+
+// ErrAccountTaskRetryLimit 表示账号任务已经达到自动与人工共用的重试上限。
+var ErrAccountTaskRetryLimit = errors.New("账号任务已达到最大重试次数")
+
 // AccountTaskSettings 用于本次流程后续判断的账号任务设置
 type AccountTaskSettings struct {
 	CookieID          string `json:"account_id"`
@@ -32,9 +41,11 @@ type AccountTaskRun struct {
 	SuccessCount int    `json:"success_count"`
 	FailedCount  int    `json:"failed_count"`
 	ErrorMessage string `json:"error_message"`
-	NextRetryAt  int64  `json:"next_retry_at"`
-	StartedAt    int64  `json:"started_at"`
-	FinishedAt   int64  `json:"finished_at"`
+	// AttemptCount 是包含首次执行在内的累计执行次数，用于限制自动和人工重试。
+	AttemptCount int   `json:"-"`
+	NextRetryAt  int64 `json:"next_retry_at"`
+	StartedAt    int64 `json:"started_at"`
+	FinishedAt   int64 `json:"finished_at"`
 }
 
 // AccountTaskStore 用于本次流程后续判断的账号任务Store
@@ -138,16 +149,16 @@ func (s *AccountTaskStore) ClaimRunImmediately(ctx context.Context, run AccountT
 
 // claimRun 封装claim运行业务协调。
 func (s *AccountTaskStore) claimRun(ctx context.Context, run AccountTaskRun, now int64, immediate bool) (bool, error) {
-	// retryCondition 用于本次流程后续判断的重试Condition
-	retryCondition := "next_retry_at<=?"
-	// args 用于本次流程后续判断的args
-	args := []any{now, run.RunKey, now}
+	// retryCondition 限制累计执行次数、冷却时间，并排除已明确标记为永久失败的运行记录。
+	retryCondition := "attempt_count<? AND next_retry_at<=? AND error_message NOT LIKE ?"
+	// args 保存更新时间、运行键、最大执行次数、当前时间和永久失败前缀参数。
+	args := []any{now, run.RunKey, accountTaskMaxAttempts, now, NoRetryErrorPrefix + "%"}
 	if immediate {
-		retryCondition = "1=1"
-		args = args[:2]
+		retryCondition = "attempt_count<? AND error_message NOT LIKE ?"
+		args = []any{now, run.RunKey, accountTaskMaxAttempts, NoRetryErrorPrefix + "%"}
 	}
 	// res、err 用于本次流程后续判断的res、err
-	res, err := s.DB.ExecContext(ctx, `UPDATE account_task_runs SET status='running',started_at=?,finished_at=0,error_message=''
+	res, err := s.DB.ExecContext(ctx, `UPDATE account_task_runs SET status='running',attempt_count=attempt_count+1,started_at=?,finished_at=0,error_message=''
 		WHERE run_key=? AND status='failed' AND `+retryCondition, args...)
 	if err != nil {
 		return false, err
@@ -158,22 +169,36 @@ func (s *AccountTaskStore) claimRun(ctx context.Context, run AccountTaskRun, now
 	}
 	// query 用于本次流程后续判断的查询
 	query := dialectInsertIgnorePrefix(s.Dialect) + ` INTO account_task_runs
-		(run_key,cookie_id,task_type,target_id,run_date,status,success_count,failed_count,error_message,next_retry_at,started_at,finished_at)
-		VALUES(?,?,?,?,?,'running',0,0,'',0,?,0)` + dialectInsertIgnore(s.Dialect, []string{"run_key"})
+		(run_key,cookie_id,task_type,target_id,run_date,status,success_count,failed_count,error_message,attempt_count,next_retry_at,started_at,finished_at)
+		VALUES(?,?,?,?,?,'running',0,0,'',1,0,?,0)` + dialectInsertIgnore(s.Dialect, []string{"run_key"})
 	res, err = s.DB.ExecContext(ctx, query, run.RunKey, run.CookieID, run.TaskType, run.TargetID, run.RunDate, now)
 	if err != nil {
 		return false, err
 	}
 	// n 用于本次流程后续判断的n
 	n, _ := res.RowsAffected()
+	if n == 0 && immediate {
+		// attemptCount、status 保存人工重试未抢占时的累计次数和运行状态，用于判断是否达到上限。
+		var (
+			attemptCount int
+			status       string
+		)
+		// queryErr 保存读取人工重试状态时的数据库错误。
+		if queryErr := s.DB.QueryRowContext(ctx, `SELECT attempt_count,status FROM account_task_runs WHERE run_key=?`, run.RunKey).Scan(&attemptCount, &status); queryErr != nil && !errors.Is(queryErr, sql.ErrNoRows) {
+			return false, queryErr
+		}
+		if status == "failed" && attemptCount >= accountTaskMaxAttempts {
+			return false, ErrAccountTaskRetryLimit
+		}
+	}
 	return n > 0, nil
 }
 
 // FinishRun 封装Finish运行业务协调。
 func (s *AccountTaskStore) FinishRun(ctx context.Context, runKey, status string, success, failed int, message string, nextRetryAt int64) error {
 	// err 用于本次流程后续判断的err
-	_, err := s.DB.ExecContext(ctx, `UPDATE account_task_runs SET status=?,success_count=?,failed_count=?,error_message=?,next_retry_at=?,finished_at=? WHERE run_key=?`,
-		status, success, failed, message, nextRetryAt, time.Now().UTC().Unix(), runKey)
+	_, err := s.DB.ExecContext(ctx, `UPDATE account_task_runs SET status=?,success_count=?,failed_count=?,error_message=?,next_retry_at=CASE WHEN ?='failed' AND attempt_count>=? THEN 0 ELSE ? END,finished_at=? WHERE run_key=?`,
+		status, success, failed, message, status, accountTaskMaxAttempts, nextRetryAt, time.Now().UTC().Unix(), runKey)
 	return err
 }
 
@@ -198,7 +223,7 @@ func (s *AccountTaskStore) RecentRuns(ctx context.Context, cookieID string, limi
 	}
 	// rows、err 用于本次流程后续判断的rows、err
 	rows, err := s.DB.QueryContext(ctx, `SELECT id,run_key,cookie_id,task_type,target_id,run_date,status,success_count,failed_count,
-		error_message,next_retry_at,started_at,finished_at FROM account_task_runs WHERE cookie_id=? ORDER BY id DESC LIMIT ?`, cookieID, limit)
+		error_message,attempt_count,next_retry_at,started_at,finished_at FROM account_task_runs WHERE cookie_id=? ORDER BY id DESC LIMIT ?`, cookieID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +235,7 @@ func (s *AccountTaskStore) RecentRuns(ctx context.Context, cookieID string, limi
 		var row AccountTaskRun
 		if // err 用于本次流程后续判断的err
 		err := rows.Scan(&row.ID, &row.RunKey, &row.CookieID, &row.TaskType, &row.TargetID, &row.RunDate,
-			&row.Status, &row.SuccessCount, &row.FailedCount, &row.ErrorMessage, &row.NextRetryAt,
+			&row.Status, &row.SuccessCount, &row.FailedCount, &row.ErrorMessage, &row.AttemptCount, &row.NextRetryAt,
 			&row.StartedAt, &row.FinishedAt); err != nil {
 			return nil, err
 		}

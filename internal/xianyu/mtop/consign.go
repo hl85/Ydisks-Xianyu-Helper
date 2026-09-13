@@ -74,7 +74,7 @@ func (c *ClientImpl) ConsignContextWithDelivery(ctx context.Context, cookiesStr,
 
 		// MTop 通常会在 token 过期响应中通过 Set-Cookie 下发新签名 token。
 		// 若没有下发，则主动调用 token API 尝试刷新一次。
-		if currentCookies == previousCookies {
+		if !mtopTokenCookieChanged(previousCookies, currentCookies) {
 			// refreshed、refreshErr 用于本次流程后续判断的refreshed、refreshErr
 			refreshed, refreshErr := c.RefreshTokenContext(ctx, currentCookies)
 			if refreshErr != nil {

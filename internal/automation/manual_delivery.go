@@ -12,7 +12,17 @@ import (
 )
 
 // ManualFullDelivery 对已存在订单执行完整发货，复用付款后发货规则但隔离人工与自动运行的幂等键。
-func (c *Center) ManualFullDelivery(ctx context.Context, order *db.Order) (int, error) {
+func (c *Center) ManualFullDelivery(ctx context.Context, order *db.Order) (sent int, deliveryErr error) {
+	defer func() {
+		if c == nil || c.logger == nil || order == nil {
+			return
+		}
+		if deliveryErr == nil {
+			c.logger.Info("手动完整发货成功", "account", order.CookieID, "order_id", order.OrderID, "sent_count", sent)
+			return
+		}
+		c.logger.Warn("手动完整发货失败", "account", order.CookieID, "order_id", order.OrderID, "sent_count", sent, "err", deliveryErr)
+	}()
 	// task、taskErr 保存校验、补全后的人工订单发货任务及其失败原因。
 	task, taskErr := c.prepareManualDeliveryTask(ctx, order)
 	if taskErr != nil {
@@ -106,10 +116,13 @@ func (c *Center) handlePriorManualDelivery(ctx context.Context, task Task, manua
 	if strings.HasPrefix(priorRun.ErrorMessage, db.NoRetryErrorPrefix) {
 		return true, 0, fmt.Errorf("该订单此前向卡密接口请求的结果不确定，已停止自动补发以避免重复扣费，请先在自动化异常中核对")
 	}
+	if priorRun.DeliveryProof.RefillPending {
+		return true, 0, fmt.Errorf("上次补取卡密结果未可靠保存，已禁止再次取卡，请先人工核对")
+	}
 	if deliveryProofPresent(priorRun.DeliveryProof) {
 		if priorRun.Status == "failed" || priorRun.Status == "needs_review" {
-			// sent、replayErr 保存快照补发数量和补发失败原因，失败后运行仍保留原快照。
-			sent, replayErr := c.replayDeliveryProof(ctx, task, priorRun)
+			// sent、replayErr 保存已原子领取快照的补发数量和补发失败原因，失败后运行仍保留原快照。
+			sent, replayErr := c.claimAndReplayDeliveryProof(ctx, task, priorRun)
 			return true, sent, replayErr
 		}
 		if priorRun.Status == "success" {
@@ -133,9 +146,12 @@ func (c *Center) handleExistingManualDelivery(ctx context.Context, task Task, ru
 		return true, 0, fmt.Errorf("该订单的人工完整发货正在执行，请勿重复提交")
 	}
 	if run.Status == "failed" || run.Status == "needs_review" {
+		if run.DeliveryProof.RefillPending {
+			return true, 0, fmt.Errorf("上次补取卡密结果未可靠保存，已禁止再次取卡，请先人工核对")
+		}
 		if deliveryProofPresent(run.DeliveryProof) {
-			// sent、replayErr 保存人工运行快照的补发数量和失败原因。
-			sent, replayErr := c.replayDeliveryProof(ctx, task, run)
+			// sent、replayErr 保存已原子领取的人工运行快照补发数量和失败原因。
+			sent, replayErr := c.claimAndReplayDeliveryProof(ctx, task, run)
 			return true, sent, replayErr
 		}
 		if run.Status == "failed" && run.SentCount == 0 {
@@ -195,6 +211,9 @@ func (c *Center) executeManualDeliveryRule(ctx context.Context, task Task, rule 
 	if !started {
 		// existingRun、existingErr 保存本规则的人工幂等运行及其读取失败原因。
 		existingRun, existingErr := c.store.Automation.GetRunByRuleAndTrigger(ctx, rule.ID, manualTriggerKey)
+		if errors.Is(existingErr, db.ErrNotFound) {
+			return 0, fmt.Errorf("该订单已有另一条付款发货运行，已拒绝重复发货，请先在自动化异常中核对")
+		}
 		if existingErr != nil {
 			return 0, existingErr
 		}
@@ -256,11 +275,69 @@ func deliveryProofPresent(proof db.AutomationDeliveryProof) bool {
 	return len(proof.Messages) > 0 || strings.TrimSpace(proof.TradeText) != "" || len(proof.PicList) > 0
 }
 
-// replayDeliveryProof 把失败运行已持久化的订单内容按原始顺序重新发送，并再次确认闲鱼发货状态。
-func (c *Center) replayDeliveryProof(ctx context.Context, task Task, run *db.AutomationRun) (int, error) {
+// claimAndReplayDeliveryProof 先以新代次原子领取快照，再发送内容，确保同一订单的并发人工请求只会有一个发送者。
+func (c *Center) claimAndReplayDeliveryProof(ctx context.Context, task Task, run *db.AutomationRun) (int, error) {
+	if run == nil {
+		return 0, fmt.Errorf("订单发货运行不存在")
+	}
+	if run.DeliveryProof.RefillPending {
+		return 0, fmt.Errorf("上次补取卡密结果未可靠保存，已禁止再次取卡，请先人工核对")
+	}
+	if !deliveryProofPresent(run.DeliveryProof) {
+		return 0, fmt.Errorf("订单没有可重发的发货内容快照")
+	}
+	// planErr 在领取和发送前阻止遗漏后续动作、损坏快照或未收口补取，避免重复发送已知内容。
+	if _, planErr := deliveryReplayPlan(run); planErr != nil {
+		return 0, planErr
+	}
+	// leaseExpiresAt 保存本次人工补发的短期数据库占用截止时间，发送外部消息前必须先完成领取。
+	leaseExpiresAt := time.Now().UTC().Add(5 * time.Minute).Unix()
+	// replayAttempt、claimed、claimErr 分别保存新执行代次、是否取得唯一补发权及条件更新错误。
+	replayAttempt, claimed, claimErr := c.store.Automation.ClaimDeliveryReplay(ctx, run.ID, run.AttemptCount, leaseExpiresAt)
+	if claimErr != nil {
+		return 0, fmt.Errorf("领取订单内容补发: %w", claimErr)
+	}
+	if !claimed {
+		return 0, fmt.Errorf("该订单的发货内容正在补发，请勿重复提交")
+	}
+	// run 更新为本请求拥有的执行代次，后续收口或释放只能作用于该代次。
+	run.Status = "running"
+	run.AttemptCount = replayAttempt
+	run.LeaseExpiresAt = leaseExpiresAt
+	run.ActionStarted = true
+	return c.replayDeliveryProof(ctx, task, run)
+}
+
+// replayDeliveryProof 把已领取运行的订单内容按原始顺序重新发送，并再次确认闲鱼发货状态。
+// 发送、确认或收口失败时始终进入人工核对，确保失败请求不会永久占用运行或触发整批重试。
+func (c *Center) replayDeliveryProof(ctx context.Context, task Task, run *db.AutomationRun) (sent int, replayErr error) {
 	if run == nil || !deliveryProofPresent(run.DeliveryProof) {
 		return 0, fmt.Errorf("订单没有可重发的发货内容快照")
 	}
+	// defer 在本次补发未收口时释放唯一发送权；使用脱离取消的短上下文，避免原请求超时后把运行永久留在执行中。
+	defer func() {
+		if replayErr == nil {
+			return
+		}
+		// releaseCtx、releaseCancel 为状态释放提供有界且不继承父请求取消的补偿上下文。
+		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer releaseCancel()
+		// replayReason 保存人工补发失败的未知结果提示，确保恢复策略不会降级为普通重试。
+		replayReason := "人工补发失败，外部结果可能未知: " + replayErr.Error()
+		// releaseErr 保存释放当前补发代次的条件更新错误。
+		releaseErr := c.store.Automation.ReleaseDeliveryReplay(releaseCtx, run.ID, run.AttemptCount, "needs_review", replayReason)
+		if releaseErr != nil {
+			replayErr = errors.Join(replayErr, fmt.Errorf("恢复订单内容补发状态: %w", releaseErr))
+		}
+	}()
+	// executionCtx、stopLease、leaseErr 维护整个补发批次的执行权，失权立即取消后续消息和取卡。
+	executionCtx, stopLease, leaseErr := startRunExecutionLease(ctx, c.store.Automation, run.ID, run.AttemptCount, runExecutionLeaseInterval)
+	if leaseErr != nil {
+		return 0, leaseErr
+	}
+	defer stopLease()
+	ctx = executionCtx
+
 	// allowed、allowedErr 保存账号自动化门禁结果，账号暂停或停用时不能发送补发消息。
 	allowed, allowedErr := c.accountAutomationAllowed(ctx, task.AccountID)
 	if allowedErr != nil {
@@ -271,6 +348,14 @@ func (c *Center) replayDeliveryProof(ctx context.Context, task Task, run *db.Aut
 	}
 	// messages 保存按原顺序恢复的消息，旧快照没有 Messages 时兼容图片后文本的历史顺序。
 	messages := append([]db.AutomationDeliveryMessage(nil), run.DeliveryProof.Messages...)
+	if run.DeliveryProof.ExpectedUnits <= 0 {
+		return 0, fmt.Errorf("订单发货快照缺少逐单位记录，已保留人工核对，不能猜测剩余卡密数量")
+	}
+	// knownUnits 表示已有内容覆盖的确定、未知和合法跳过单位总数。
+	knownUnits := run.DeliveryProof.PreparedUnits + run.DeliveryProof.UnknownUnits + len(run.DeliveryProof.SkippedTemplateMessages)
+	if knownUnits > run.DeliveryProof.ExpectedUnits {
+		return 0, fmt.Errorf("订单发货快照单位数量无效: %d/%d", knownUnits, run.DeliveryProof.ExpectedUnits)
+	}
 	if len(messages) == 0 {
 		// imageURL 保存旧版快照的一张图片地址；旧版没有跨类型消息顺序，因此仅按历史图片列表恢复。
 		for _, imageURL := range run.DeliveryProof.PicList {
@@ -299,15 +384,92 @@ func (c *Center) replayDeliveryProof(ctx context.Context, task Task, run *db.Aut
 			return messageIndex, fmt.Errorf("原样补发订单内容失败: %w", sendErr)
 		}
 	}
+	// refillCount、refillErr 保存只针对缺失卡密单位执行的补发数量和错误；已保存内容不会再次读取库存。
+	refillCount, refillErr := c.refillPartialDeliveryProof(ctx, task, run)
+	if refillErr != nil {
+		return len(messages) + refillCount, refillErr
+	}
+	if run.DeliveryProof.RefillPending || run.DeliveryProof.PreparedUnits+run.DeliveryProof.UnknownUnits+len(run.DeliveryProof.SkippedTemplateMessages) != run.DeliveryProof.ExpectedUnits {
+		return len(messages) + refillCount, fmt.Errorf("补发后仍有缺失内容，不能确认整单发货，请先人工核对")
+	}
 	// proof 保存确认闲鱼发货接口所需历史文本和图片凭证，不由重发次数重新拼装。
-	proof := shipmentDeliveryProof{tradeText: run.DeliveryProof.TradeText, picList: append([]string(nil), run.DeliveryProof.PicList...)}
+	proof := shipmentDeliveryProof{tradeText: run.DeliveryProof.TradeText, picList: append([]string(nil), run.DeliveryProof.PicList...), expectedUnits: run.DeliveryProof.ExpectedUnits, preparedUnits: run.DeliveryProof.PreparedUnits, unknownUnits: run.DeliveryProof.UnknownUnits, skippedTemplateMessages: append([]db.AutomationDeliverySkip(nil), run.DeliveryProof.SkippedTemplateMessages...)}
+	proof.refillPending = run.DeliveryProof.RefillPending
 	// confirmErr 保存闲鱼确认发货或本地订单事实写入失败原因，消息已发送时不得重新取卡。
 	if confirmErr := c.actions.confirmShipmentWithProof(ctx, task, proof); confirmErr != nil {
-		return len(messages), confirmErr
+		return len(messages) + refillCount, confirmErr
 	}
-	// completeErr 保存补发运行收口失败原因，此时仅允许人工核对，不能重新发送快照。
+	// completeErr 保存补发运行收口失败原因；返回后由延迟释放恢复原终态，沿用既有人工补发处理策略。
 	if completeErr := c.store.Automation.CompleteDeliveryReplay(ctx, run.ID, run.AttemptCount); completeErr != nil {
-		return len(messages), fmt.Errorf("补发内容已发送但保存运行结果失败: %w", completeErr)
+		return len(messages) + refillCount, fmt.Errorf("补发内容已发送但保存运行结果失败: %w", completeErr)
 	}
-	return len(messages), nil
+	return len(messages) + refillCount, nil
+}
+
+// refillPartialDeliveryProof 为逐单位快照补齐尚未生成的直接卡密；API 卡密和模板卡密缺少安全续取语义时转人工核对。
+func (c *Center) refillPartialDeliveryProof(ctx context.Context, task Task, run *db.AutomationRun) (int, error) {
+	// remaining 表示扣除已确定和待人工确认单位后仍需生成的卡密数量。
+	remaining := run.DeliveryProof.ExpectedUnits - run.DeliveryProof.PreparedUnits - run.DeliveryProof.UnknownUnits - len(run.DeliveryProof.SkippedTemplateMessages)
+	if remaining <= 0 {
+		return 0, nil
+	}
+	// refillAction、planErr 从运行创建时的动作计划读取唯一补齐来源，禁止规则编辑改变卡组。
+	refillAction, planErr := deliveryReplayPlan(run)
+	if planErr != nil {
+		return 0, planErr
+	}
+	// card、cardErr 保存补发动作对应的卡密组类型；API 卡密重新请求可能重复扣费，禁止自动续取。
+	card, cardErr := c.store.Cards.GetForDelivery(ctx, refillAction.CardID)
+	if cardErr != nil {
+		return 0, fmt.Errorf("读取补发卡密组: %w", cardErr)
+	}
+	if card.Type == "api" {
+		return 0, fmt.Errorf("API 卡密剩余单位不能自动重新请求，已保留人工核对")
+	}
+	// refillTask 固定为单个订单单位，避免把原订单数量再次乘入剩余数量。
+	refillTask := task
+	refillTask.Quantity = "1"
+	// refillAction 按尚缺单位数执行，数量不再乘入原订单数量。
+	refillAction.DeliveryCount = remaining
+	// pendingProof 在任何库存消费前保存占用；崩溃、取消或后续快照写入失败都不会丢失该保护。
+	pendingProof := run.DeliveryProof
+	pendingProof.RefillPending = true
+	if markErr := c.store.Automation.UpdateDeliveryReplayProof(ctx, run.ID, run.AttemptCount, pendingProof); markErr != nil { // markErr 表示占用未持久化，此时必须在取卡之前终止。
+		return 0, fmt.Errorf("保存补取卡密占用: %w", markErr)
+	}
+	run.DeliveryProof = pendingProof
+	// result、sendErr 保存补齐动作的实际发送结果和错误。
+	result, sendErr := c.actions.sendCardWithProof(ctx, refillTask, refillAction)
+	// newProof 保存本次新增内容；清零计划单位数，避免合并时重复累计原订单总量。
+	newProof := result.proof
+	newProof.expectedUnits = 0
+	// merged 保存原快照与本次补发结果合并后的完整凭证。
+	merged := mergeShipmentDeliveryProof(shipmentDeliveryProof{
+		tradeText: run.DeliveryProof.TradeText, picList: append([]string(nil), run.DeliveryProof.PicList...),
+		messages: append([]db.AutomationDeliveryMessage(nil), run.DeliveryProof.Messages...), preparedUnits: run.DeliveryProof.PreparedUnits,
+		unknownUnits: run.DeliveryProof.UnknownUnits, expectedUnits: run.DeliveryProof.ExpectedUnits,
+		skippedTemplateMessages: append([]db.AutomationDeliverySkip(nil), run.DeliveryProof.SkippedTemplateMessages...),
+	}, newProof)
+	merged = mergeShipmentDeliveryProof(merged, result.reviewProof)
+	// uncertain 保存没有可恢复内容的外部结果不确定错误，例如库存恢复失败；这类错误不能解除取卡占用。
+	var uncertain *uncertainActionError
+	// unresolved 表示仍有无法从返回快照核对的取卡结果，后续人工请求必须停止。
+	unresolved := errors.As(sendErr, &uncertain) && result.reviewProof.unknownUnits == 0
+	// savedProof 同时提交完整新内容与占用状态，避免快照和解除保护分开写入。
+	savedProof := db.AutomationDeliveryProof{
+		TradeText: merged.tradeText, PicList: append([]string(nil), merged.picList...), Messages: append([]db.AutomationDeliveryMessage(nil), merged.messages...),
+		ExpectedUnits: merged.expectedUnits, PreparedUnits: merged.preparedUnits, UnknownUnits: merged.unknownUnits, RefillPending: unresolved || merged.refillPending,
+		SkippedTemplateMessages: append([]db.AutomationDeliverySkip(nil), merged.skippedTemplateMessages...),
+	}
+	// saveCtx、saveCancel 让请求取消后仍能有界保存已消费内容；写入失败则保留之前的占用标记。
+	saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer saveCancel()
+	if saveErr := c.store.Automation.UpdateDeliveryReplayProof(saveCtx, run.ID, run.AttemptCount, savedProof); saveErr != nil { // saveErr 表示外部动作后快照未可靠保存，禁止把旧数量视作可以安全再次取卡。
+		return result.sent, errors.Join(fmt.Errorf("保存补发卡密快照失败，已禁止再次取卡，请人工核对: %w", saveErr), sendErr)
+	}
+	run.DeliveryProof = savedProof
+	if sendErr != nil {
+		return result.sent, fmt.Errorf("补齐剩余卡密失败: %w", sendErr)
+	}
+	return result.sent, nil
 }

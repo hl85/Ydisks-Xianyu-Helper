@@ -56,7 +56,7 @@ func NewItemBatchRunnerApplication(repository itemapp.BatchRepository, publisher
 	// options 保存 worker 的租约、平台会话判断与失败状态归类，运行期不再回读 Server。
 	options := itemapp.BatchRunOptions{
 		LeaseDuration:    leaseDuration,
-		IsSessionExpired: IsSessionExpiredError,
+		IsSessionExpired: IsCredentialExpiredError,
 		ClassifyFailure:  classifyFailure,
 	}
 	return itemapp.NewBatchRunner(repository, publisher, options)

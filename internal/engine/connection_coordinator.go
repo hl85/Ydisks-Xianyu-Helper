@@ -10,6 +10,9 @@ import (
 	"xianyu-go/internal/xianyu/ws"
 )
 
+// maxImmediateTokenRefreshes 限制一次连续 Token 失败期间的即时凭证刷新次数，避免平台持续拒绝时形成无延迟热循环。
+const maxImmediateTokenRefreshes = 1
+
 // connectionShutdownJoinTimeout 是连接协调器取消账号运行 Context 后等待自有 worker 退出的总预算。
 // recorder 的单次数据库 I/O 已使用同一数量级的超时；该预算避免不响应取消的底层实现永久阻塞 Run。
 const connectionShutdownJoinTimeout = WSRecordWriteTimeout
@@ -20,6 +23,19 @@ const connectionShutdownJoinTimeout = WSRecordWriteTimeout
 type connectionCoordinator struct {
 	// account 是本协调器唯一服务的账号 facade，New 在对象对外可见前写入。
 	account *Account
+}
+
+// credentialSigningCookies 读取当前 Cookie 中 MTOP 签名令牌所在的请求输入；数据库不可用时返回 false，调用方不得据此宣称恢复成功。
+func (a *Account) credentialSigningCookies(ctx context.Context) (string, bool) {
+	if a == nil || a.store == nil || a.store.Cookies == nil {
+		return "", false
+	}
+	// runtimeData、err 保存仅用于读取签名输入的账号运行时凭证及读取错误。
+	runtimeData, err := a.store.Cookies.GetCookieRuntimeData(ctx, a.CookieID)
+	if err != nil {
+		return "", false
+	}
+	return runtimeData.Value, true
 }
 
 // run 阻塞执行单账号连接主循环，直到调用方取消、账号禁用或不可恢复的认证错误。
@@ -65,7 +81,7 @@ func (c *connectionCoordinator) run(parent context.Context) error {
 		// 官网先完成原生 WebSocket 握手，再从 authTokenCallback 获取本次
 		// 连接专用 token，最后发送 /reg。
 		// conn、err 保存当前 WebSocket 连接及拨号或后续认证阶段的错误。
-		conn, err := a.wsDialer.Dial(ctx, ws.Config{Recorder: a.wsRecorder()}, a.logger)
+		conn, err := a.wsDialer.Dial(ctx, ws.Config{Recorder: a.wsRecorder(), ObserveOutgoing: a.outgoing.observePlatformSendResponse}, a.logger)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -273,6 +289,41 @@ func (c *connectionCoordinator) handleTokenAcquisitionFailure(ctx context.Contex
 		a.logger.Warn("闲鱼要求安全验证，停止本次消息登录", "err", tokenErr)
 		a.alertEvent(ctx, EventSecurityVerification, AlertLevelWarn, "闲鱼要求安全验证", "账号触发闲鱼风控验证（滑块/人脸等），需要重新登录或完成人工验证。")
 		return false, tokenErr
+	}
+	if mtop.IsMTopTokenExpiredErr(tokenErr) {
+		// 仅 MTOP Token 过期时，先绕过健康账号的 sdkSilent 疲劳窗口恢复登录态 Cookie，
+		// 再重新获取连接 Token；恢复失败才进入普通退避，避免把短期签名过期误报成 Session 失效。
+		reason := "MTOP Token 已过期，正在立即刷新登录态"
+		a.logger.Warn("MTOP Token 过期，开始即时刷新登录态", "err", tokenErr)
+		a.clearTokenCache(ctx)
+		a.setRuntimeState(RuntimeReconnecting, reason)
+		a.notifyOffline(ctx, reason+"："+errString(tokenErr))
+		// beforeSigningCookies、canCheckSigningToken 分别保存即时续期前的 Cookie 和签名检查条件；没有数据库时保留兼容测试替身的旧语义。
+		beforeSigningCookies, canCheckSigningToken := a.credentialSigningCookies(ctx)
+		// credentialStoreConfigured 表示生产凭证仓储已配置；配置存在但读取失败时不得走无数据库兼容成功分支。
+		credentialStoreConfigured := a.store != nil && a.store.Cookies != nil
+		a.mu.Lock()
+		// allowImmediateRefresh 表示本轮是否仍可执行一次即时刷新；计数在外部回调前提交，防止失败回调反复重入。
+		allowImmediateRefresh := a.handler != nil && a.tokenImmediateRefreshes < maxImmediateTokenRefreshes
+		if allowImmediateRefresh {
+			a.tokenImmediateRefreshes++
+		}
+		a.mu.Unlock()
+		if allowImmediateRefresh && a.handler.OnPasswordLoginRefresh(ctx, a.CookieID) {
+			// afterSigningCookies、afterOK 分别保存续期后的 Cookie 和读取是否成功，用于确认恢复回调确实轮换了签名令牌，而不是只改变普通 Cookie。
+			afterSigningCookies, afterOK := a.credentialSigningCookies(ctx)
+			if credentialStoreConfigured && (!canCheckSigningToken || !afterOK) {
+				a.logger.Warn("MTOP Token 续期后无法读取凭证，进入正常重连退避", "account", a.CookieID)
+			} else if credentialStoreConfigured && !mtop.MTopTokenCookieChanged(beforeSigningCookies, afterSigningCookies) {
+				a.logger.Warn("MTOP Token 续期返回成功但凭证未变化，进入正常重连退避", "account", a.CookieID)
+			} else {
+				a.reloadCookieFromDB(ctx)
+				a.clearCurrentToken()
+				a.resetFailures()
+				a.setRuntimeState(RuntimeConnecting, "登录态刷新成功，正在重新连接")
+				return true, nil
+			}
+		}
 	}
 	if mtop.IsSessionExpiredErr(tokenErr) {
 		// reason 是登录态恢复期间写入运行状态与通知的用户可见原因。

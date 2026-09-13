@@ -2,6 +2,7 @@ import { Bell,Mail,MessageCircle,Send as Telegram,Webhook } from 'lucide-react';
 import { buildEmailChannelConfig,enableCustomSMTP,normalizeEmailChannelConfig } from '../../../notificationEmailConfig';
 import type { NotificationChannel,NotificationChannelType,NotificationEventType,SystemSettings } from './api';
 import type { NotificationChannelMeta,NotificationEventMeta,NotificationForm,NotificationPayload } from './types';
+import { normalizeNotificationEventTypes } from './models';
 
 // notificationChannelTypes 是所有通知渠道的静态字段、图标和使用指南。
 export const notificationChannelTypes: Record<NotificationChannelType, NotificationChannelMeta> = {
@@ -60,7 +61,11 @@ export const notificationEvents: NotificationEventMeta[] = [
   { value: 'account_recovered', label: '恢复通知', description: '自动恢复成功并重新在线' },
   { value: 'account_disabled', label: '禁用通知', description: '连续失败、账密错误等导致账号停用' },
   { value: 'security_verification', label: '风控验证', description: '滑块、人脸、扫码验证等安全校验' },
-  { value: 'delivery_result', label: '交易通知', description: '订单发货、卡密发送等交易结果' },
+  { value: 'automation_order_created', label: '拍下改价', description: '买家拍下订单后，自动改价任务的成功、失败或人工核对结果' },
+  { value: 'automation_order_paid', label: '付款发货', description: '买家付款后，自动发货任务的成功、失败或人工核对结果' },
+  { value: 'automation_buyer_reviewed', label: '评价赠品', description: '买家评价后，评价赠品任务的成功、失败或人工核对结果' },
+  { value: 'automation_review_missing_timeout', label: '求评价', description: '订单超时未评价时，求评价任务的成功、失败或人工核对结果' },
+  { value: 'manual_delivery_result', label: '手动发货结果', description: '人工发货或确认发货的结果，不属于自动化任务分类' },
   { value: 'token_renewal', label: '续期通知', description: 'Cookie/token 续期和自动恢复过程' },
   { value: 'system_error', label: '系统错误', description: '后台任务或系统级异常' },
 ];
@@ -88,7 +93,7 @@ export const normalizeNotificationForm = (channel: NotificationChannel, smtp: Sy
   const config = normalizedEmailConfig
     ? (normalizedEmailConfig.use_custom_smtp === true ? enableCustomSMTP(normalizedEmailConfig, smtp) : normalizedEmailConfig)
     : { ...(channel.config || {}) };
-  return { name: channel.name, type: channel.type, enabled: channel.enabled, config, event_types: channel.event_types || [] };
+  return { name: channel.name, type: channel.type, enabled: channel.enabled, config, event_types: normalizeNotificationEventTypes(channel.event_types || []) };
 };
 
 // validateNotificationForm 校验渠道名称、渠道字段和独立 SMTP 必填项。

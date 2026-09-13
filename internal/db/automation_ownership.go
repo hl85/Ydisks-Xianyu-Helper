@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
 // beginOwnershipWrite 为 a 的自动化写入建立事务；ctx 控制等待，cookieID/orderID 是任务声称的本地归属。
@@ -74,6 +75,14 @@ func (a *AutomationRules) TryStartRun(ctx context.Context, run AutomationRun) (i
 		return 0, false, beginErr
 	}
 	defer transaction.Rollback()
+	// allowed 表示同一账号订单是否已经被另一个付款发货运行领取；该检查与插入共享账号/订单锁。
+	allowed, allowErr := allowOrderDeliveryRun(ctx, transaction, run)
+	if allowErr != nil {
+		return 0, false, allowErr
+	}
+	if !allowed {
+		return 0, false, nil
+	}
 	// runID、started、startErr 保存同事务中的幂等创建/重领结果，未提交时不能向执行层返回成功。
 	runID, started, startErr := a.tryStartRun(ctx, transaction, run)
 	if startErr != nil {
@@ -95,6 +104,48 @@ func (a *AutomationRules) TryStartRun(ctx context.Context, run AutomationRun) (i
 		return 0, false, commitErr
 	}
 	return runID, started, nil
+}
+
+// allowOrderDeliveryRun 在付款发货运行创建前检查跨触发来源的订单执行权。
+// 自动事件与人工补发可以使用不同幂等键，但同一账号订单不能同时产生两条有副作用的发货运行；
+// 仅允许人工入口接管历史上没有发送内容且没有凭证快照的空运行。
+func allowOrderDeliveryRun(ctx context.Context, transaction *sql.Tx, run AutomationRun) (bool, error) {
+	if run.TriggerType != "order_paid" || strings.TrimSpace(run.OrderID) == "" {
+		return true, nil
+	}
+	// rows 保存同一账号订单的付款发货历史；查询在账号/订单写锁内执行，避免检查与插入之间出现空窗。
+	rows, queryErr := transaction.QueryContext(ctx, `SELECT trigger_key,status,sent_count,delivery_proof
+		FROM automation_runs WHERE cookie_id=? AND order_id=? AND trigger_type=?`, run.CookieID, run.OrderID, run.TriggerType)
+	if queryErr != nil {
+		return false, queryErr
+	}
+	defer rows.Close()
+	// manual 表示当前入口是否是人工完整发货；它可以处理旧版本遗留的无快照成功或零发送失败运行。
+	manual := strings.HasPrefix(run.TriggerKey, "manual_delivery:")
+	for rows.Next() {
+		// triggerKey、status、proof 保存历史运行的最小防重字段，不解密或输出凭证内容。
+		var triggerKey, status, proof string
+		// sentCount 保存历史运行已经发送的消息数量，用于识别旧版零发送失败记录。
+		var sentCount int
+		// scanErr 保存历史运行防重字段的读取错误。
+		scanErr := rows.Scan(&triggerKey, &status, &sentCount, &proof)
+		if scanErr != nil {
+			return false, scanErr
+		}
+		if triggerKey == run.TriggerKey {
+			continue
+		}
+		if manual && strings.TrimSpace(proof) == "" && (status == "success" || (status == "failed" && sentCount == 0)) {
+			continue
+		}
+		return false, nil
+	}
+	// rowsErr 保存遍历历史运行结果时的延迟读取错误。
+	rowsErr := rows.Err()
+	if rowsErr != nil {
+		return false, rowsErr
+	}
+	return true, nil
 }
 
 // StartRunAction 为 a 中 runID 的 attempt 代次和 cursor 游标领取动作；ctx 控制取消，leaseExpiresAt 是 UTC 租约截止秒数。

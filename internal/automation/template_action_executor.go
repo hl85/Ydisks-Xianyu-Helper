@@ -59,11 +59,21 @@ func (e *automationActionExecutor) sendTemplate(ctx context.Context, task Task, 
 	}
 	// result 保存已经确认投递成功的模板消息数量和发货凭证。
 	result := actionExecutionResult{}
-	for /* message 表示模板中按顺序发送的一条消息。 */ _, message := range action.TemplateMessages {
+	result.proof.expectedUnits = len(action.TemplateMessages)
+	for /* messageIndex、message 分别表示模板消息的零基位置和当前待渲染内容。 */ messageIndex, message := range action.TemplateMessages {
+		// executionErr 在加载下一条模板变量之前复核执行权，防止旧动作继续消费卡密。
+		if executionErr := checkRunExecution(ctx); executionErr != nil {
+			return result, executionErr
+		}
+
 		// reservations 保存当前消息首次加载变量时消费的批量卡密。
-		reservations, loadErr := e.loadTemplateMessageValues(ctx, task, action, &state, message)
+		reservations, refillPending, loadErr := e.loadTemplateMessageValues(ctx, task, action, &state, message)
 		if loadErr != nil {
-			return actionExecutionResult{}, loadErr
+			if refillPending {
+				result.proof.refillPending = true
+				return result, loadErr
+			}
+			return result, loadErr
 		}
 		// text 保存订单字段、卡密变量和规则自定义变量都渲染后的最终消息。
 		text := deliverytemplate.Replace(message, deliverytemplate.VariableValues{
@@ -77,9 +87,11 @@ func (e *automationActionExecutor) sendTemplate(ctx context.Context, task Task, 
 		if strings.TrimSpace(text) == "" {
 			// restoreErr 保存空消息导致的库存恢复错误。
 			if restoreErr := e.restoreTemplateReservations(ctx, reservations); restoreErr != nil {
-				return actionExecutionResult{}, uncertainAction(restoreErr)
+				result.proof.refillPending = true
+				return result, uncertainAction(restoreErr)
 			}
 			e.clearTemplateMessageValues(&state, message)
+			result.proof.skippedTemplateMessages = append(result.proof.skippedTemplateMessages, db.AutomationDeliverySkip{MessageIndex: messageIndex})
 			continue
 		}
 		// sendErr 保存模板消息发送错误。
@@ -87,22 +99,25 @@ func (e *automationActionExecutor) sendTemplate(ctx context.Context, task Task, 
 			if result.sent == 0 && errors.Is(sendErr, ErrMessageNotSent) && !state.apiFetched {
 				// restoreErr 保存确定未发送时的库存恢复错误。
 				if restoreErr := e.restoreTemplateReservations(ctx, reservations); restoreErr != nil {
-					return actionExecutionResult{}, uncertainAction(errors.Join(sendErr, restoreErr))
+					result.proof.refillPending = true
+					return result, uncertainAction(errors.Join(sendErr, restoreErr))
 				}
-				return actionExecutionResult{}, sendErr
+				return result, sendErr
 			}
+			result.reviewProof.unknownUnits++
 			result.reviewProof.tradeText = appendTradeText(result.reviewProof.tradeText, text)
 			result.reviewProof.messages = append(result.reviewProof.messages, db.AutomationDeliveryMessage{Kind: "text", Content: text})
 			return result, uncertainAction(sendErr)
 		}
 		result.sent++
+		result.proof.preparedUnits++
 		result.proof.tradeText = appendTradeText(result.proof.tradeText, text)
 		result.proof.messages = append(result.proof.messages, db.AutomationDeliveryMessage{Kind: "text", Content: text})
 	}
 	if result.sent == 0 {
 		// notSentErr 表示模板渲染后没有任何可确认发送的消息。
 		notSentErr := fmt.Errorf("%w: 发货模板渲染后没有可发送内容", ErrMessageNotSent)
-		return actionExecutionResult{}, notSentErr
+		return result, notSentErr
 	}
 	return result, nil
 }
@@ -146,7 +161,7 @@ func (e *automationActionExecutor) prepareTemplateDelivery(ctx context.Context, 
 }
 
 // loadTemplateMessageValues 为当前模板消息加载尚未缓存的卡密变量，并保留可回滚的批量库存记录。
-func (e *automationActionExecutor) loadTemplateMessageValues(ctx context.Context, task Task, action db.AutomationAction, state *templateDeliveryState, message string) ([]templateCardReservation, error) {
+func (e *automationActionExecutor) loadTemplateMessageValues(ctx context.Context, task Task, action db.AutomationAction, state *templateDeliveryState, message string) ([]templateCardReservation, bool, error) {
 	// reservations 保存当前消息新消费的批量卡密，失败时只回滚本消息的库存。
 	reservations := make([]templateCardReservation, 0)
 	for /* key 表示当前消息首次出现的卡密变量键。 */ _, key := range deliverytemplate.CardKeys(message) {
@@ -156,29 +171,29 @@ func (e *automationActionExecutor) loadTemplateMessageValues(ctx context.Context
 		// binding、exists 保存变量绑定配置及是否存在绑定。
 		binding, exists := state.bindingCards[key]
 		if !exists {
-			return nil, fmt.Errorf("模板变量缺少卡密绑定: %s", key)
+			return nil, false, fmt.Errorf("模板变量缺少卡密绑定: %s", key)
 		}
 		// lines 保存当前变量将要替换到消息中的卡密正文列表。
 		lines, added, apiFetched, apiFailure, dispatched, empty, loadErr := e.loadTemplateBindingLines(ctx, task, action, state, binding)
 		if loadErr != nil {
 			// restoreErr 保存当前变量加载失败后的库存恢复错误。
 			if restoreErr := e.restoreTemplateReservations(ctx, append(reservations, added...)); restoreErr != nil {
-				return nil, uncertainAction(errors.Join(loadErr, restoreErr))
+				return nil, true, uncertainAction(errors.Join(loadErr, restoreErr))
 			}
 			if apiFailure {
 				if empty || dispatched || state.apiFetched || apiFetched {
-					return nil, uncertainAction(loadErr)
+					return nil, false, uncertainAction(loadErr)
 				}
-				return nil, noRetryAction(loadErr)
+				return nil, false, noRetryAction(loadErr)
 			}
-			return nil, loadErr
+			return nil, false, loadErr
 		}
 		state.apiFetched = state.apiFetched || apiFetched
 		state.values[key] = strings.Join(lines, "\n")
 		state.loadedKeys[key] = true
 		reservations = append(reservations, added...)
 	}
-	return reservations, nil
+	return reservations, false, nil
 }
 
 // loadTemplateBindingLines 按卡密类型加载一个模板变量的正文，并返回本次新增的批量库存预留。
@@ -202,6 +217,10 @@ func (e *automationActionExecutor) loadTemplateBatchLines(ctx context.Context, b
 	// reservations 保存当前变量已经消费的批量卡密。
 	reservations := make([]templateCardReservation, 0, binding.count)
 	for /* index 表示批量卡密消费的序号。 */ index := 0; index < binding.count; index++ {
+		// executionErr 在同一模板变量的每份库存消费前复核执行权，保留此前预留供补偿。
+		if executionErr := checkRunExecution(ctx); executionErr != nil {
+			return lines, reservations, false, false, false, false, executionErr
+		}
 		// unlock 保存当前卡密组的并发保护释放函数。
 		unlock := e.lockCard(binding.card.ID)
 		// content、consumeErr 保存本次批量卡密消费结果及错误。
@@ -224,6 +243,10 @@ func (e *automationActionExecutor) loadTemplateAPILines(ctx context.Context, tas
 	// apiFetched 表示当前变量是否已成功取得至少一个 API 卡密单位。
 	apiFetched := false
 	for /* unitIndex 表示当前 API 卡密变量从 1 开始的取卡单位序号。 */ unitIndex := 1; unitIndex <= binding.count; unitIndex++ {
+		// executionErr 防止同一变量的慢速 API 批次在失权后继续请求；已取得单位保持未知结果保护。
+		if executionErr := checkRunExecution(ctx); executionErr != nil {
+			return lines, nil, apiFetched, true, false, false, executionErr
+		}
 		// fetched、fetchErr 保存当前模板变量 API 取卡结果及请求错误。
 		fetched, fetchErr := state.apiFetcher.Fetch(ctx, APICardRequest{
 			Config: binding.card.APIConfig, TriggerKey: buildTriggerKey(task), ActionID: action.ID, CardID: binding.card.ID,

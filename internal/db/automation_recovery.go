@@ -170,6 +170,14 @@ type automationRecoverySnapshot struct {
 
 // automationIssuePolicy 封装自动化问题Policy业务协调。
 func automationIssuePolicy(rawEventJSON string, actionStarted bool, actionCursor int, ruleEnabled bool, sentCount int, errorMessage string) (string, []string) {
+	if strings.HasPrefix(errorMessage, "人工补发失败，外部结果可能未知") {
+		// 人工补发已经重新发送过快照或尝试确认发货，不能用 continue 跳过确认动作造成假收口。
+		return "external_result_unknown", []string{"cancel"}
+	}
+	if !actionStarted && sentCount > 0 && automationSnapshotHasDeliveryAction(rawEventJSON) {
+		// 历史记录若丢失动作占用标志而已有发送数量，无法证明当前动作未执行，必须人工核对。
+		return "partial_failure", []string{"cancel"}
+	}
 	if actionStarted {
 		// 外部接口没有可依赖的幂等键。结果未知时禁止 retry；未知发卡且后续需要确认时还禁止 continue。
 		if !automationUnknownActionCanContinue(rawEventJSON, actionCursor) {
@@ -200,6 +208,22 @@ func automationIssuePolicy(rawEventJSON string, actionStarted bool, actionCursor
 		return "partial_failure", []string{"continue", "retry", "cancel"}
 	}
 	return "execution_failed", []string{"retry", "cancel"}
+}
+
+// automationSnapshotHasDeliveryAction 判断历史快照是否包含可能重复消耗卡密的发货动作。
+func automationSnapshotHasDeliveryAction(rawEventJSON string) bool {
+	// snapshot 保存从历史任务快照解析出的动作计划。
+	var snapshot automationRecoverySnapshot
+	if json.Unmarshal([]byte(rawEventJSON), &snapshot) != nil {
+		return false
+	}
+	// action 表示历史快照中的一个动作定义。
+	for _, action := range snapshot.ActionPlan {
+		if action.ActionType == "send_card" || action.ActionType == "send_template" {
+			return true
+		}
+	}
+	return false
 }
 
 // automationUnknownActionCanContinue 判断结果未知的当前动作是否可以由人工确认后跳过。

@@ -1,16 +1,19 @@
 package automation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -491,8 +494,10 @@ func TestRuleMatchingUsesStoredOrderItemWhenEventOmitsItemID(t *testing.T) {
 	}
 	// sender 用于本次流程后续判断的sender
 	sender := &testSender{}
+	// logs 捕获规则成功收口日志，验证自动化完成后不会静默返回。
+	var logs bytes.Buffer
 	// center 用于本次流程后续判断的center
-	center := New(store, testSenderProvider{sender: sender}, nil)
+	center := New(store, testSenderProvider{sender: sender}, slog.New(slog.NewTextHandler(&logs, nil)))
 	if // err 用于本次流程后续判断的err
 	err := center.HandleTask(ctx, Task{
 		AccountID: "cid", TriggerType: TriggerBuyerReviewed, OrderID: "known-order",
@@ -501,6 +506,9 @@ func TestRuleMatchingUsesStoredOrderItemWhenEventOmitsItemID(t *testing.T) {
 	}
 	if len(sender.texts) != 1 || sender.texts[0] != "review-gift" {
 		t.Fatalf("应使用本地订单 item_id 匹配商品规则，got %v", sender.texts)
+	}
+	if !strings.Contains(logs.String(), "自动化规则执行成功") {
+		t.Fatalf("缺少自动化规则成功日志: %s", logs.String())
 	}
 }
 
@@ -1624,10 +1632,12 @@ func TestManualFullDeliveryIsImmediateIdempotentAndForcesConfirmation(t *testing
 	}
 	// sender 用于本次流程后续判断的sender
 	sender := &testSender{}
+	// logs 捕获人工发货的成功和重复失败日志，验证两种终态都可观察。
+	var logs bytes.Buffer
 	// mtopMock 用于本次流程后续判断的mtopMock
 	mtopMock := &fakeMTop{consignOk: true}
 	// center 用于本次流程后续判断的center
-	center := NewWithDependencies(store, testSenderProvider{sender: sender}, nil, CenterDependencies{
+	center := NewWithDependencies(store, testSenderProvider{sender: sender}, slog.New(slog.NewTextHandler(&logs, nil)), CenterDependencies{
 		MTop:               mtopMock,
 		OrderDetailFetcher: testFetcher{detail: &OrderDetail{Quantity: "1", OrderStatus: "pending_ship"}},
 	})
@@ -1648,6 +1658,9 @@ func TestManualFullDeliveryIsImmediateIdempotentAndForcesConfirmation(t *testing
 	}
 	if len(sender.texts) != 1 || mtopMock.consignCalls != 1 {
 		t.Fatalf("duplicate request caused side effects: texts=%v consign=%d", sender.texts, mtopMock.consignCalls)
+	}
+	if !strings.Contains(logs.String(), "手动完整发货成功") || !strings.Contains(logs.String(), "手动完整发货失败") {
+		t.Fatalf("缺少人工发货成功或失败日志: %s", logs.String())
 	}
 }
 
@@ -1798,7 +1811,9 @@ func TestManualFullDeliveryReplaysStoredContentWithoutReadingCards(t *testing.T)
 		t.Fatalf("领取人工快照动作失败: started=%v err=%v", actionStarted, actionStartErr)
 	}
 	// proof 保存此前已经确定但未能完成发货的唯一卡密内容；重发必须只使用这条消息。
-	proof := db.AutomationDeliveryProof{TradeText: "SNAPSHOT-CARD", Messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: "SNAPSHOT-CARD"}}}
+	proof := db.AutomationDeliveryProof{TradeText: "SNAPSHOT-CARD", Messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: "SNAPSHOT-CARD"}}, ExpectedUnits: 1, PreparedUnits: 1}
+	// 补齐生产运行始终携带的原始动作计划，使快照恢复测试同时校验整单义务。
+	saveManualReplayTestPlan(t, ctx, store, runID, proof.ExpectedUnits)
 	// quarantineErr 模拟消息结果不确定时直接从已占用动作进入人工核对；该生产路径保留 action_started 作为禁止普通重试的标记，
 	// 但原样补发收口必须兼容该标记，不能依赖 AdvanceRunAction 预先清理动作占用。
 	quarantineErr := store.Automation.QuarantineRunResultWithProof(ctx, runID, currentRun.AttemptCount, 1, "消息回显超时", &proof)
@@ -1814,6 +1829,177 @@ func TestManualFullDeliveryReplaysStoredContentWithoutReadingCards(t *testing.T)
 	replayedRun, replayedErr := store.Automation.GetRun(ctx, runID)
 	if replayedErr != nil || replayedRun.Status != "success" || len(replayedRun.DeliveryProof.Messages) != 1 || replayedRun.DeliveryProof.Messages[0].Content != "SNAPSHOT-CARD" {
 		t.Fatalf("快照补发收口异常: run=%+v err=%v", replayedRun, replayedErr)
+	}
+}
+
+// TestManualFullDeliveryRefillsMissingDirectCardUnits 验证部分快照只补齐缺失的直接卡密单位后才确认整单发货。
+func TestManualFullDeliveryRefillsMissingDirectCardUnits(t *testing.T) {
+	// ctx、store、center、sender、mtopMock、order、cleanup 保存部分快照补齐所需夹具。
+	ctx, store, center, sender, mtopMock, order, cleanup := newManualDeliveryFixture(t, "replay-partial-order")
+	defer cleanup()
+	// ruleID、ruleErr 保存当前商品付款规则标识。
+	var ruleID int64
+	// ruleErr 保存读取当前商品付款规则标识失败原因。
+	if ruleErr := store.DB.QueryRowContext(ctx, `SELECT id FROM automation_rules WHERE cookie_id=? AND item_id=? AND trigger_type=?`, order.CookieID, order.ItemID, TriggerOrderPaid).Scan(&ruleID); ruleErr != nil {
+		t.Fatal(ruleErr)
+	}
+	// manualKey 保存人工完整发货的幂等键。
+	manualKey := buildManualDeliveryTriggerKey(Task{OrderID: order.OrderID})
+	// runID、started、startErr 保存待补发历史运行的创建结果。
+	runID, started, startErr := store.Automation.TryStartRun(ctx, db.AutomationRun{
+		RuleID: ruleID, CookieID: order.CookieID, ItemID: order.ItemID, OrderID: order.OrderID,
+		TriggerType: TriggerOrderPaid, TriggerKey: manualKey, LeaseExpiresAt: time.Now().Add(time.Minute).Unix(),
+	})
+	if startErr != nil || !started {
+		t.Fatalf("创建部分快照运行失败: id=%d started=%v err=%v", runID, started, startErr)
+	}
+	// currentRun、runErr 保存当前运行代次，写入人工核对快照前必须取得它。
+	currentRun, runErr := store.Automation.GetRun(ctx, runID)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	// actionStarted、actionStartErr 保存动作占用结果。
+	actionStarted, actionStartErr := store.Automation.StartRunAction(ctx, runID, currentRun.AttemptCount, 0, time.Now().Add(time.Minute).Unix())
+	if actionStartErr != nil || !actionStarted {
+		t.Fatalf("领取部分快照动作失败: started=%v err=%v", actionStarted, actionStartErr)
+	}
+	// proof 表示两件卡密中已有一件内容，另一件必须从原直接卡密动作补齐。
+	proof := db.AutomationDeliveryProof{TradeText: "SNAPSHOT-CARD", Messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: "SNAPSHOT-CARD"}}, ExpectedUnits: 2, PreparedUnits: 1}
+	// 补齐生产运行始终携带的原始动作计划，使快照恢复测试同时校验整单义务。
+	saveManualReplayTestPlan(t, ctx, store, runID, proof.ExpectedUnits)
+	// quarantineErr 保存将部分快照置为人工核对状态的错误。
+	if quarantineErr := store.Automation.QuarantineRunResultWithProof(ctx, runID, currentRun.AttemptCount, 1, "消息回显超时", &proof); quarantineErr != nil {
+		t.Fatal(quarantineErr)
+	}
+	// sent、deliveryErr 保存原样快照和缺失卡密补齐后的总发送结果。
+	sent, deliveryErr := center.ManualFullDelivery(ctx, order)
+	if deliveryErr != nil || sent != 2 || len(sender.texts) != 2 || sender.texts[0] != "SNAPSHOT-CARD" || sender.texts[1] != "MANUAL-CARD" || mtopMock.consignCalls != 1 {
+		t.Fatalf("部分快照补齐异常: sent=%d texts=%v consign=%d err=%v", sent, sender.texts, mtopMock.consignCalls, deliveryErr)
+	}
+}
+
+// TestManualFullDeliveryRejectsLegacyProofWithoutUnitCounts 验证旧版无逐单位计数的快照不会被猜测后确认发货。
+func TestManualFullDeliveryRejectsLegacyProofWithoutUnitCounts(t *testing.T) {
+	// ctx、store、center、sender、mtopMock、order、cleanup 保存旧版快照夹具。
+	ctx, store, center, sender, _, order, cleanup := newManualDeliveryFixture(t, "replay-legacy-order")
+	defer cleanup()
+	// ruleID、ruleErr 保存当前商品付款规则标识。
+	var ruleID int64
+	// ruleErr 保存读取当前商品付款规则标识失败原因。
+	if ruleErr := store.DB.QueryRowContext(ctx, `SELECT id FROM automation_rules WHERE cookie_id=? AND item_id=? AND trigger_type=?`, order.CookieID, order.ItemID, TriggerOrderPaid).Scan(&ruleID); ruleErr != nil {
+		t.Fatal(ruleErr)
+	}
+	// runID、started、startErr 保存带旧版快照的运行创建结果。
+	runID, started, startErr := store.Automation.TryStartRun(ctx, db.AutomationRun{RuleID: ruleID, CookieID: order.CookieID, ItemID: order.ItemID, OrderID: order.OrderID, TriggerType: TriggerOrderPaid, TriggerKey: buildManualDeliveryTriggerKey(Task{OrderID: order.OrderID}), LeaseExpiresAt: time.Now().Add(time.Minute).Unix()})
+	if startErr != nil || !started {
+		t.Fatalf("创建旧版快照运行失败: id=%d started=%v err=%v", runID, started, startErr)
+	}
+	// currentRun、runErr 保存当前运行代次。
+	currentRun, runErr := store.Automation.GetRun(ctx, runID)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	// claimed、claimErr 保存领取旧版快照动作的结果及错误。
+	if claimed, claimErr := store.Automation.StartRunAction(ctx, runID, currentRun.AttemptCount, 0, time.Now().Add(time.Minute).Unix()); claimErr != nil || !claimed {
+		t.Fatalf("领取旧版快照动作失败: claimed=%v err=%v", claimed, claimErr)
+	}
+	// proof 缺少逐单位计数，人工请求必须停止并保留原快照。
+	proof := db.AutomationDeliveryProof{TradeText: "LEGACY-CARD", Messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: "LEGACY-CARD"}}}
+	// quarantineErr 保存将旧版快照置为人工核对状态的错误。
+	if quarantineErr := store.Automation.QuarantineRunResultWithProof(ctx, runID, currentRun.AttemptCount, 1, "旧版快照", &proof); quarantineErr != nil {
+		t.Fatal(quarantineErr)
+	}
+	// sent、deliveryErr 保存旧版快照人工请求的发送数量和拒绝原因。
+	if sent, deliveryErr := center.ManualFullDelivery(ctx, order); deliveryErr == nil || sent != 0 || len(sender.texts) != 0 {
+		t.Fatalf("旧版快照不应自动补发: sent=%d texts=%v err=%v", sent, sender.texts, deliveryErr)
+	}
+}
+
+// TestManualFullDeliveryClaimsReplayBeforeSending 验证并发人工补发只允许一个请求在快照消息发送前取得运行所有权。
+func TestManualFullDeliveryClaimsReplayBeforeSending(t *testing.T) {
+	// ctx、store、mtopMock、order、cleanup 保存快照补发测试夹具及可观察依赖。
+	ctx, store, _, _, mtopMock, order, cleanup := newManualDeliveryFixture(t, "replay-claim-order")
+	defer cleanup()
+	// ruleID、ruleErr 保存当前商品付款规则标识，供创建同一人工幂等运行使用。
+	var ruleID int64
+	// ruleErr 保存读取付款发货规则标识失败的数据库错误。
+	ruleErr := store.DB.QueryRowContext(ctx, `SELECT id FROM automation_rules WHERE cookie_id=? AND item_id=? AND trigger_type=?`, order.CookieID, order.ItemID, TriggerOrderPaid).Scan(&ruleID)
+	if ruleErr != nil {
+		t.Fatal(ruleErr)
+	}
+	// manualTask 保存人工补发的固定订单事实。
+	manualTask := Task{AccountID: order.CookieID, TriggerType: TriggerOrderPaid, OrderID: order.OrderID}
+	// manualKey 保存人工完整发货独立幂等键，用于定位同订单原样重发快照。
+	manualKey := buildManualDeliveryTriggerKey(manualTask)
+	// runID、started、startErr 保存含快照的历史人工运行创建结果。
+	runID, started, startErr := store.Automation.TryStartRun(ctx, db.AutomationRun{
+		RuleID: ruleID, CookieID: order.CookieID, ItemID: order.ItemID, OrderID: order.OrderID,
+		TriggerType: TriggerOrderPaid, TriggerKey: manualKey, LeaseExpiresAt: time.Now().Add(time.Minute).Unix(),
+	})
+	if startErr != nil || !started {
+		t.Fatalf("创建人工快照运行失败: id=%d started=%v err=%v", runID, started, startErr)
+	}
+	// currentRun、runErr 保存当前运行租约和代次，推进检查点前必须复用该代次。
+	currentRun, runErr := store.Automation.GetRun(ctx, runID)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	// actionStarted、actionStartErr 占用动作检查点，使快照通过生产人工核对路径落库。
+	actionStarted, actionStartErr := store.Automation.StartRunAction(ctx, runID, currentRun.AttemptCount, 0, time.Now().Add(time.Minute).Unix())
+	if actionStartErr != nil || !actionStarted {
+		t.Fatalf("领取人工快照动作失败: started=%v err=%v", actionStarted, actionStartErr)
+	}
+	// proof 保存唯一的可重发卡密内容；并发请求不得对它重复调用发送器。
+	proof := db.AutomationDeliveryProof{TradeText: "CLAIM-SNAPSHOT", Messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: "CLAIM-SNAPSHOT"}}, ExpectedUnits: 1, PreparedUnits: 1}
+	// 补齐生产运行始终携带的原始动作计划，使快照恢复测试同时校验整单义务。
+	saveManualReplayTestPlan(t, ctx, store, runID, proof.ExpectedUnits)
+	// quarantineErr 把带快照的历史运行置为人工核对状态，作为两个请求争抢的初始状态。
+	quarantineErr := store.Automation.QuarantineRunResultWithProof(ctx, runID, currentRun.AttemptCount, 1, "消息回显超时", &proof)
+	if quarantineErr != nil {
+		t.Fatal(quarantineErr)
+	}
+	// sender 在首条消息发送时阻塞，确保第二个请求观察到第一个请求已领取但尚未完成的运行。
+	sender := &blockingAutomationSender{firstEntered: make(chan struct{}), secondEntered: make(chan struct{}), release: make(chan struct{})}
+	// center 使用可阻塞发送器，其他依赖与生产人工完整发货路径保持一致。
+	center := NewWithDependencies(store, blockingSenderProvider{sender: sender}, nil, CenterDependencies{
+		MTop:               mtopMock,
+		OrderDetailFetcher: testFetcher{detail: &OrderDetail{Quantity: "1", OrderStatus: "pending_ship"}},
+	})
+	// firstResult 保存第一个人工补发请求最终的发送数量和错误。
+	type firstResult struct {
+		// sent 保存第一个请求确认的补发消息数量。
+		sent int
+		// err 保存第一个请求完成补发时的错误。
+		err error
+	}
+	// firstDone 接收异步首个请求的结果，避免测试 goroutine 泄漏。
+	firstDone := make(chan firstResult, 1)
+	go func() {
+		// sent、deliveryErr 保存第一个请求的补发结果。
+		sent, deliveryErr := center.ManualFullDelivery(ctx, order)
+		firstDone <- firstResult{sent: sent, err: deliveryErr}
+	}()
+	select {
+	case <-sender.firstEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("第一个补发请求未进入消息发送")
+	}
+	// secondSent、secondErr 保存并发第二个请求的结果；它必须在发送前被数据库领取状态拒绝。
+	secondSent, secondErr := center.ManualFullDelivery(ctx, order)
+	if secondErr == nil || !strings.Contains(secondErr.Error(), "正在执行") || secondSent != 0 {
+		t.Fatalf("并发补发未被拒绝: sent=%d err=%v", secondSent, secondErr)
+	}
+	// release 允许唯一领取者完成消息发送和确认发货；关闭 channel 同时释放所有潜在等待者。
+	close(sender.release)
+	// result 等待首个请求收口，测试必须确保异步 goroutine 已退出。
+	result := <-firstDone
+	if result.err != nil || result.sent != 1 || mtopMock.consignCalls != 1 {
+		t.Fatalf("首个补发请求异常: sent=%d consign=%d err=%v", result.sent, mtopMock.consignCalls, result.err)
+	}
+	// calls 验证第二个请求没有进入消息发送，因此同一快照只对外发送一次。
+	calls := atomic.LoadInt32(&sender.calls)
+	if calls != 1 {
+		t.Fatalf("并发补发重复发送快照: calls=%d", calls)
 	}
 }
 

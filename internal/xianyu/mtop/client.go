@@ -17,6 +17,7 @@ import (
 
 	"xianyu-go/internal/xianyu"
 	"xianyu-go/internal/xianyu/cookierefresh"
+	"xianyu-go/internal/xianyu/protocol"
 )
 
 // RegAppKey 是 WS 注册用的 appKey（与签名用的 protocol.SignAppKey 不同）。
@@ -114,6 +115,16 @@ func (c *ClientImpl) httpClientWithTimeout(defaultTimeout time.Duration) *http.C
 	}
 	clone.Transport = loggingTransport{base: transport, logger: c.Logger}
 	return &clone
+}
+
+// logInfo 记录不包含 Cookie、签名和响应正文的 MTOP 诊断信息；未注入日志器时沿用进程默认日志器。
+func (c *ClientImpl) logInfo(message string, args ...any) {
+	// logger 保存当前客户端实际使用的安全日志器。
+	logger := c.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Info(message, args...)
 }
 
 // loggingTransport 用于本次流程后续判断的loggingTransport
@@ -358,6 +369,34 @@ func IsMTopTokenExpiredErr(err error) bool {
 	return ok && kind == MTopErrorTokenExpired
 }
 
+// mtopTokenCookieValue 提取请求 Cookie 中第一个签名令牌原值，用于保留现有 MTOP 重试的完整 Cookie 轮换语义。
+func mtopTokenCookieValue(cookies string) string {
+	// part 表示当前待解析的 Cookie 片段。
+	for _, part := range strings.Split(cookies, ";") {
+		// key、value、ok 保存当前 Cookie 片段的名称、值和格式是否有效。
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && strings.TrimSpace(key) == "_m_h5_tk" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// mtopTokenCookieChanged 判断响应后的 Cookie 是否包含真正变化的签名令牌，而不是任意普通 Cookie 变化。
+func mtopTokenCookieChanged(previous, current string) bool {
+	// previousToken、currentToken 保存请求前后的完整签名令牌值。
+	previousToken, currentToken := mtopTokenCookieValue(previous), mtopTokenCookieValue(current)
+	return currentToken != "" && previousToken != currentToken
+}
+
+// MTopTokenCookieChanged 判断两份 Cookie 中实际用于 MTOP 签名的 _m_h5_tk 是否发生非空轮换。
+// 调用方只能据此确认签名输入是否变化，不能把普通 Cookie 或 metadata 变化当作签名恢复。
+func MTopTokenCookieChanged(previous, current string) bool {
+	// previousToken、currentToken 保存请求前后真正参与签名的令牌前缀，忽略仅更新时间戳后缀的变化。
+	previousToken, currentToken := protocol.SignToken(previous), protocol.SignToken(current)
+	return currentToken != "" && previousToken != currentToken
+}
+
 // mtopResponseFailure 按统一规则分类 MTOP 失败响应；它不参与成功响应处理。
 func (c *ClientImpl) mtopResponseFailure(api string, status int, ret []string, detail string) error {
 	return c.mtopResponseFailureWithCause(api, status, ret, detail, nil)
@@ -492,7 +531,10 @@ func isSessionExpiredRet(ret []string) bool {
 	for _, value := range ret {
 		// lower 用于本次流程后续判断的lower
 		lower := strings.ToLower(value)
-		if strings.Contains(lower, "fail_sys_session_expired") ||
+		if strings.Contains(lower, "session_expired") ||
+			strings.Contains(lower, "sid_invalid") ||
+			strings.Contains(lower, "auth_reject") ||
+			strings.Contains(lower, "need_login") ||
 			strings.Contains(lower, "session过期") ||
 			strings.Contains(lower, "session expired") ||
 			strings.Contains(lower, "会话过期") {
@@ -577,7 +619,7 @@ func isRiskVerificationRet(ret []string) bool {
 	return false
 }
 
-// IsSessionExpiredErr 判断错误是否表示 cookie/session 已彻底失效（需密码登录刷新）。
+// IsSessionExpiredErr 判断 err 是否表示 Session 失效；返回 true 时由上层协议续期，失败后要求扫码。
 func IsSessionExpiredErr(err error) bool {
 	if err == nil {
 		return false
@@ -593,11 +635,14 @@ func IsSessionExpiredErr(err error) bool {
 	}
 	// msg 用于本次流程后续判断的msg
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "fail_sys_session_expired") ||
-		strings.Contains(msg, "session过期") ||
-		strings.Contains(msg, "session expired") ||
-		strings.Contains(msg, "会话过期") ||
+	return isSessionExpiredRet([]string{msg}) ||
 		strings.Contains(msg, "登录凭证已失效")
+}
+
+// IsCredentialRefreshableErr 判断错误是否表示当前 Cookie 凭证需要进入统一恢复流程。
+// 仅 MTOP 签名 Token 过期可以先刷新登录态 Cookie；Session 失效则按原有协议续期或重新登录处理。
+func IsCredentialRefreshableErr(err error) bool {
+	return IsSessionExpiredErr(err) || IsMTopTokenExpiredErr(err)
 }
 
 // mtopString 封装mtopString业务协调。

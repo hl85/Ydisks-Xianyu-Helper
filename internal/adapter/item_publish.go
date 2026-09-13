@@ -24,7 +24,7 @@ type ItemPublishPort struct {
 	logger *slog.Logger
 	// updateRunningCookie 将平台返回的新 Cookie 同步到运行中的账号实例。
 	updateRunningCookie func(context.Context, string, string)
-	// recoverExpiredSession 在平台报告会话过期时触发账号恢复并返回是否已获得可重试凭证。
+	// recoverExpiredSession 在平台报告 Session 或 MTOP Token 过期时触发账号恢复并返回是否已获得可重试凭证。
 	recoverExpiredSession func(context.Context, string, error) bool
 }
 
@@ -216,7 +216,7 @@ func (p *ItemPublishPort) publish(ctx context.Context, input itemapp.PublishInpu
 		if persistErr != nil {
 			callErr = errors.Join(callErr, fmt.Errorf("保存发布响应 Cookie: %w", persistErr))
 		}
-		if allowRetry && mtop.IsSessionExpiredErr(callErr) && p.recoverExpired(ctx, input.CookieID, callErr) {
+		if allowRetry && mtop.IsCredentialRefreshableErr(callErr) && p.recoverExpired(ctx, input.CookieID, callErr) {
 			return p.publish(ctx, input, false)
 		}
 		p.recoverExpired(ctx, input.CookieID, callErr)

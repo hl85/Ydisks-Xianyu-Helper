@@ -36,12 +36,12 @@ func TestSendTemplateHandlesEmptyAndUnavailableActions(t *testing.T) {
 	}
 	// blankResult、blankErr 保存模板消息全部为空白时的执行结果。
 	blankResult, blankErr := executor.sendTemplate(ctx, Task{AccountID: "cid"}, db.AutomationAction{ConfigJSON: "{}", TemplateMessages: []string{" ", "\n"}})
-	if !errors.Is(blankErr, ErrMessageNotSent) || blankResult.sent != 0 {
+	if !errors.Is(blankErr, ErrMessageNotSent) || blankResult.sent != 0 || len(blankResult.proof.skippedTemplateMessages) != 2 {
 		t.Fatalf("空白模板消息应阻止后续动作：result=%+v err=%v", blankResult, blankErr)
 	}
 	// missingNicknameResult、missingNicknameErr 保存合法订单变量为空时的零消息结果。
 	missingNicknameResult, missingNicknameErr := executor.sendTemplate(ctx, Task{AccountID: "cid"}, db.AutomationAction{ConfigJSON: "{}", TemplateMessages: []string{"{{buyer_nickname}}"}})
-	if !errors.Is(missingNicknameErr, ErrMessageNotSent) || missingNicknameResult.sent != 0 || len(sender.texts) != 0 {
+	if !errors.Is(missingNicknameErr, ErrMessageNotSent) || missingNicknameResult.sent != 0 || len(missingNicknameResult.proof.skippedTemplateMessages) != 1 || len(sender.texts) != 0 {
 		t.Fatalf("缺失买家昵称应阻止后续动作：result=%+v err=%v texts=%v", missingNicknameResult, missingNicknameErr, sender.texts)
 	}
 	// admin、adminErr 保存创建测试卡券所需的管理员用户。
@@ -201,5 +201,40 @@ func TestSendTemplateClassifiesPartialSendFailure(t *testing.T) {
 	var uncertain *uncertainActionError
 	if result.sent != 1 || len(sender.texts) != 1 || !errors.As(runErr, &uncertain) || !errors.Is(runErr, sender.err) || result.proof.tradeText != "第一条" || result.reviewProof.tradeText != "第二条" {
 		t.Fatalf("部分发送分类错误：result=%+v texts=%v err=%v", result, sender.texts, runErr)
+	}
+}
+
+// TestSendTemplatePreservesProofWhenLaterCardLoadFails 验证前序模板消息已发送后，后续取卡失败不会丢失累计凭证。
+func TestSendTemplatePreservesProofWhenLaterCardLoadFails(t *testing.T) {
+	// store、cleanup 保存模板后续取卡失败测试使用的数据库和清理函数。
+	store, cleanup := newAutomationTestStore(t)
+	defer cleanup()
+	// ctx 是本测试共用的非取消上下文。
+	ctx := context.Background()
+	// admin、adminErr 保存创建模板卡密组所需的管理员用户。
+	admin, adminErr := store.Users.GetByUsername(ctx, "admin")
+	if adminErr != nil {
+		t.Fatal(adminErr)
+	}
+	// firstID、firstErr 保存第一条消息会消费的有效批量卡密组。
+	firstID, firstErr := store.Cards.Create(ctx, &db.CardFull{Name: "first-template-proof", Type: "data", DataContent: "FIRST", Enabled: true, UserID: admin.ID})
+	if firstErr != nil {
+		t.Fatal(firstErr)
+	}
+	// secondID、secondErr 保存第二条消息会读取但没有库存的批量卡密组。
+	secondID, secondErr := store.Cards.Create(ctx, &db.CardFull{Name: "second-template-proof", Type: "data", DataContent: "", Enabled: true, UserID: admin.ID})
+	if secondErr != nil {
+		t.Fatal(secondErr)
+	}
+	// sender 保存第一条模板消息的实际发送结果。
+	sender := &testSender{}
+	// executor 是绑定测试库存和发送器的模板执行器。
+	executor := automationActionExecutor{store: store, senders: testSenderProvider{sender: sender}}
+	// action 保存第一条成功、第二条取卡失败的模板动作。
+	action := db.AutomationAction{ActionType: ActionSendTemplate, ConfigJSON: "{}", TemplateMessages: []string{"第一条 {{cards.first}}", "第二条 {{cards.second}}"}, TemplateBindings: []db.DeliveryTemplateBinding{{VariableKey: "first", CardID: firstID}, {VariableKey: "second", CardID: secondID}}}
+	// result、runErr 保存模板执行累计结果和后续取卡失败原因。
+	result, runErr := executor.sendTemplate(ctx, Task{AccountID: "cid", OrderID: "template-proof-order", ChatID: "chat", BuyerID: "buyer"}, action)
+	if runErr == nil || result.sent != 1 || result.proof.preparedUnits != 1 || len(result.proof.messages) != 1 || result.proof.messages[0].Content != "第一条 FIRST" {
+		t.Fatalf("后续取卡失败丢失前序凭证: result=%+v err=%v messages=%v", result, runErr, sender.texts)
 	}
 }

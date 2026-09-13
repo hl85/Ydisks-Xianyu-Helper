@@ -104,8 +104,8 @@ func TestAutoLoginModeMatchesBrowserPlugin(t *testing.T) {
 	}
 }
 
-// TestAutoLoginDecisionUsesFirstCookieForDuplicatePaths 封装TestAuto登录DecisionUsesFirst登录凭证ForDuplicatePaths业务协调。
-func TestAutoLoginDecisionUsesFirstCookieForDuplicatePaths(t *testing.T) {
+// TestAutoLoginDecisionUsesLastCookieForDuplicatePaths 验证插件解析同名 Cookie 时由末值覆盖首值。
+func TestAutoLoginDecisionUsesLastCookieForDuplicatePaths(t *testing.T) {
 	// now 用于本次流程后续判断的now
 	now := time.Now()
 	// cookies 用于本次流程后续判断的cookies
@@ -116,9 +116,9 @@ func TestAutoLoginDecisionUsesFirstCookieForDuplicatePaths(t *testing.T) {
 		"havana_lgc_exp=" + strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10),
 	}, "; ")
 	// mode、reason 用于本次流程后续判断的mode、reason
-	mode, reason := autoLoginMode(firstCookieValues(cookies), now)
-	if mode != autoLoginModeHavana || reason != "" {
-		t.Fatalf("mode=%q reason=%q；应采用浏览器排序后的首个同名 Cookie", mode, reason)
+	mode, reason := autoLoginMode(autoLoginCookieValues(cookies), now)
+	if mode != "" || reason != "fatigue" {
+		t.Fatalf("mode=%q reason=%q；应采用插件解析后的末个同名 Cookie", mode, reason)
 	}
 }
 
@@ -414,7 +414,7 @@ func TestRenewAPIFirstUsesBrowserCookieScopes(t *testing.T) {
 	host = strings.Split(host, ":")[0]
 	// snapshot 用于本次流程后续判断的snapshot
 	snapshot := []cookierefresh.BrowserCookie{
-		{Name: "havana_lgc_exp", Value: futureMillis(time.Hour), Domain: ".goofish.com", Path: "/", HTTPOnly: true},
+		{Name: "havana_lgc_exp", Value: futureMillis(time.Hour), Domain: ".goofish.com", Path: "/"},
 		{Name: "request_only", Value: "passport", Domain: host, Path: "/"},
 		{Name: "www_only", Value: "private", Domain: "www.goofish.com", Path: "/im"},
 		{Name: "http_only_document", Value: "hidden", Domain: ".goofish.com", Path: "/", HTTPOnly: true},
@@ -434,8 +434,8 @@ func TestRenewAPIFirstUsesBrowserCookieScopes(t *testing.T) {
 	}
 }
 
-// TestRenewAPIFirstUsesHTTPOnlyLongLoginCookieForDecision 封装TestRenewAPIFirstUsesHTTPOnlyLong登录登录凭证ForDecision业务协调。
-func TestRenewAPIFirstUsesHTTPOnlyLongLoginCookieForDecision(t *testing.T) {
+// TestRenewAPIFirstExcludesHTTPOnlyLongLoginCookieForDecision 验证仅 HttpOnly 到期标记不能触发脚本续期。
+func TestRenewAPIFirstExcludesHTTPOnlyLongLoginCookieForDecision(t *testing.T) {
 	useTestDesktopFingerprint(t)
 	// calls 用于本次流程后续判断的calls
 	var calls atomic.Int32
@@ -453,7 +453,7 @@ func TestRenewAPIFirstUsesHTTPOnlyLongLoginCookieForDecision(t *testing.T) {
 	svc := Service{HTTPClient: srv.Client(), SilentHasLoginURL: srv.URL, RetryDelay: -1}
 	// res、err 用于本次流程后续判断的res、err
 	res, err := svc.RenewAPIFirst(context.Background(), "", snapshot)
-	if err != nil || res == nil || !res.Success || res.Skipped || res.RequestCount != 1 || calls.Load() != 1 {
+	if err != nil || res == nil || res.Success || !res.Skipped || res.SkipReason != "long_login_expired" || res.RequestCount != 0 || calls.Load() != 0 {
 		t.Fatalf("result=%+v calls=%d err=%v", res, calls.Load(), err)
 	}
 }
@@ -738,8 +738,8 @@ func TestRenewAPIFirstReturnsAtPromiseTimeoutAndKeepsLateCookies(t *testing.T) {
 	if lateErr != nil || late == nil || len(late.SetCookies) != 1 || !strings.Contains(late.NewCookies, "sdkSilent=") {
 		t.Fatalf("迟到响应 Cookie 丢失: result=%+v err=%v", late, lateErr)
 	}
-	if !completed.Load() || !late.Success || late.NeedPasswordLogin {
-		t.Fatalf("底层请求完成后应返回真实业务终态: %+v completed=%v", late, completed.Load())
+	if !completed.Load() || late.Success || late.NeedPasswordLogin || !late.StepDetails[0].BusinessOK {
+		t.Fatalf("迟到业务成功不能改变已超时的 Promise，Cookie 必须仍被保留；completed=%v", completed.Load())
 	}
 }
 

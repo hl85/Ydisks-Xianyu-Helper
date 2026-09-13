@@ -207,9 +207,9 @@ func (s *Server) sendChatImage(w http.ResponseWriter, r *http.Request) {
 		} else if errors.Is(err, chatapp.ErrOffline) {
 			writeErr(w, http.StatusConflict, "账号当前离线，无法发送图片")
 		} else if errors.Is(err, chatapp.ErrSendUncertain) {
-			writeErrDetails(w, http.StatusBadGateway, "chat_image_send_uncertain", "图片发送结果待确认，请先到闲鱼核对，避免重复发送", "", map[string]any{"outgoing_message": sent})
+			writeErrDetails(w, http.StatusBadGateway, "chat_image_send_uncertain", "图片发送结果待确认，请先到闲鱼核对，避免重复发送", "", map[string]any{"outgoing_message": newChatMessageDTOFromApplication(sent)})
 		} else if errors.Is(err, chatapp.ErrSend) {
-			writeErrDetails(w, http.StatusBadGateway, "chat_image_send_failed", "图片发送失败，请重试", "", map[string]any{"outgoing_message": sent})
+			writeErrDetails(w, http.StatusBadGateway, "chat_image_send_failed", "图片发送失败，请重试", "", map[string]any{"outgoing_message": newChatMessageDTOFromApplication(sent)})
 		} else if errors.Is(err, chatapp.ErrStatusSave) {
 			writeChatStatusSaveError(w, sent)
 		} else {
@@ -337,9 +337,9 @@ func (s *Server) sendChatMessage(w http.ResponseWriter, r *http.Request) {
 		} else if errors.Is(err, chatapp.ErrOffline) {
 			writeErr(w, http.StatusConflict, "账号当前离线，无法发送消息")
 		} else if errors.Is(err, chatapp.ErrSendUncertain) {
-			writeErrDetails(w, http.StatusBadGateway, "chat_send_uncertain", "发送结果待确认，请先到闲鱼核对，避免重复发送", "", map[string]any{"outgoing_message": sent})
+			writeErrDetails(w, http.StatusBadGateway, "chat_send_uncertain", "发送结果待确认，请先到闲鱼核对，避免重复发送", "", map[string]any{"outgoing_message": newChatMessageDTOFromApplication(sent)})
 		} else if errors.Is(err, chatapp.ErrSend) {
-			writeErrDetails(w, http.StatusBadGateway, "chat_message_send_failed", "发送失败，请重试", "", map[string]any{"outgoing_message": sent})
+			writeErrDetails(w, http.StatusBadGateway, "chat_message_send_failed", "发送失败，请重试", "", map[string]any{"outgoing_message": newChatMessageDTOFromApplication(sent)})
 		} else if errors.Is(err, chatapp.ErrStatusSave) {
 			writeChatStatusSaveError(w, sent)
 		} else {

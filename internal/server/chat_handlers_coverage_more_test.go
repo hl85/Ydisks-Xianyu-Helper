@@ -274,6 +274,7 @@ func TestChatSendTextHandlerCoversAvailabilityValidationAndErrors(t *testing.T) 
 		{"unavailable", chatapp.ErrUnavailable, http.StatusServiceUnavailable},
 		{"offline", chatapp.ErrOffline, http.StatusConflict},
 		{"send", chatapp.ErrSend, http.StatusBadGateway},
+		{"uncertain", chatapp.ErrSendUncertain, http.StatusBadGateway},
 		{"status save", chatapp.ErrStatusSave, http.StatusInternalServerError},
 		{"other", errors.New("send failed"), http.StatusInternalServerError},
 	}
@@ -282,6 +283,9 @@ func TestChatSendTextHandlerCoversAvailabilityValidationAndErrors(t *testing.T) 
 		port.sendTextErr = errorCase.err
 		// recorder 保存当前文字发送错误响应。
 		recorder := serveChatCoverageRequest(handler, cookie, http.MethodPost, "/api/v1/chat/messages", `{"account_id":"acc1","chat_id":"chat1","peer_user_id":"buyer1","text":"你好"}`)
+		if errors.Is(errorCase.err, chatapp.ErrSendUncertain) || errors.Is(errorCase.err, chatapp.ErrSend) {
+			assertOutgoingErrorDTO(t, recorder, "acc1", "chat1")
+		}
 		if recorder.Code != errorCase.status {
 			t.Errorf("%s status=%d want=%d body=%s", errorCase.name, recorder.Code, errorCase.status, recorder.Body.String())
 		}
@@ -405,6 +409,7 @@ func TestChatSendImageHandlerCoversValidationAndErrors(t *testing.T) {
 		{"unavailable", chatapp.ErrUnavailable, http.StatusServiceUnavailable},
 		{"offline", chatapp.ErrOffline, http.StatusConflict},
 		{"send", chatapp.ErrSend, http.StatusBadGateway},
+		{"uncertain", chatapp.ErrSendUncertain, http.StatusBadGateway},
 		{"status save", chatapp.ErrStatusSave, http.StatusInternalServerError},
 		{"other", errors.New("image failed"), http.StatusInternalServerError},
 	}
@@ -416,6 +421,9 @@ func TestChatSendImageHandlerCoversValidationAndErrors(t *testing.T) {
 		// recorder 保存当前图片发送错误响应。
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, request)
+		if errors.Is(errorCase.err, chatapp.ErrSendUncertain) || errors.Is(errorCase.err, chatapp.ErrSend) {
+			assertOutgoingErrorDTO(t, recorder, "acc1", "chat1")
+		}
 		if recorder.Code != errorCase.status {
 			t.Errorf("%s status=%d want=%d body=%s", errorCase.name, recorder.Code, errorCase.status, recorder.Body.String())
 		}

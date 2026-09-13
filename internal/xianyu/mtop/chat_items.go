@@ -71,16 +71,24 @@ func (c *ClientImpl) SearchChatItems(ctx context.Context, cookiesStr, sessionID,
 		if !IsMTopTokenExpiredErr(failure) {
 			return nil, failure
 		}
-		if updatedCookies != "" && updatedCookies != currentCookies {
+		if updatedCookies != "" {
+			// tokenChanged 表示响应 Cookie 是否真的轮换了签名令牌；普通 Cookie 变化仍需调用官方刷新接口。
+			tokenChanged := mtopTokenCookieChanged(currentCookies, updatedCookies)
 			currentCookies = updatedCookies
-		} else {
-			// refreshed 是官方 Token 端点恢复后的凭证结果。
-			refreshed, refreshErr := c.RefreshTokenContext(ctx, currentCookies)
-			if refreshErr != nil {
-				return nil, fmt.Errorf("刷新聊天商品查询 token 失败: %w", refreshErr)
+			if tokenChanged {
+				// sleepErr 表示 Token 新 Cookie 重试间隔是否被上下文取消。
+				if sleepErr := sleepCtx(ctx, MTopRetryGap); sleepErr != nil {
+					return nil, sleepErr
+				}
+				continue
 			}
-			currentCookies = refreshed.UpdatedCookies
 		}
+		// refreshed 是官方 Token 端点恢复后的凭证结果。
+		refreshed, refreshErr := c.RefreshTokenContext(ctx, currentCookies)
+		if refreshErr != nil {
+			return nil, fmt.Errorf("刷新聊天商品查询 token 失败: %w", refreshErr)
+		}
+		currentCookies = refreshed.UpdatedCookies
 		// sleepErr 表示 Token 重试间隔是否被上下文取消。
 		if sleepErr := sleepCtx(ctx, MTopRetryGap); sleepErr != nil {
 			return nil, sleepErr

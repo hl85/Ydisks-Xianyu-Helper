@@ -38,17 +38,6 @@ type AutomationDeliveryMessage struct {
 	Content string `json:"content"`
 }
 
-// AutomationDeliveryProof 保存确认发货和失败重发需要的订单发货快照。
-// 每个内容字段只在数据库仓储和自动化执行器之间以加密形式流转，禁止序列化到 HTTP 或日志。
-type AutomationDeliveryProof struct {
-	// TradeText 是已发送给买家的文本凭证，多个动作按顺序合并。
-	TradeText string `json:"trade_text"`
-	// PicList 是已发送给买家的图片地址，顺序与消息发送顺序一致。
-	PicList []string `json:"pic_list"`
-	// Messages 按原始发送顺序保存文本和图片，人工补发时使用它避免重新获取、消费或扣除卡密。
-	Messages []AutomationDeliveryMessage `json:"messages"`
-}
-
 // AutomationRunActionAdvance 描述动作成功后的原子检查点更新。
 type AutomationRunActionAdvance struct {
 	// RunID 是待推进的自动化运行标识。

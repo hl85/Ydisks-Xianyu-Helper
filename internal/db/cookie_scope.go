@@ -256,6 +256,8 @@ type CookieRuntimeData struct {
 	Value string
 	// MetadataJSON 是 repository 解密后的 Cookie 运行 metadata，用于恢复或识别完整 Cookie Jar 的变化。
 	MetadataJSON string
+	// LastRefreshAt 是凭证最近一次写回的修订时间戳，用于拒绝旧请求覆盖新登录。
+	LastRefreshAt int64
 }
 
 // CookiePlatformRuntimeData 表示平台调用流程所需的最小账号视图，不包含用户名、登录密码或其他账号资料。
@@ -268,6 +270,8 @@ type CookiePlatformRuntimeData struct {
 	Value string
 	// MetadataJSON 是 Cookie 快照等平台请求元数据，不包含登录密码。
 	MetadataJSON string
+	// LastRefreshAt 是凭证最近一次写回的修订时间戳，用于续期响应冲突检测。
+	LastRefreshAt int64
 	// ShowBrowser 表示 token 风控恢复是否允许使用可视化浏览器。
 	ShowBrowser bool
 }
@@ -280,8 +284,8 @@ func (c *Cookies) GetCookieRuntimeData(ctx context.Context, cookieID string) (Co
 	var encryptedValue, encryptedMetadata string
 	// queryErr 表示账号不存在或指纹输入查询失败的原因。
 	if queryErr := c.DB.QueryRowContext(ctx,
-		`SELECT value, COALESCE(metadata_json,'') FROM cookies WHERE id=?`, cookieID).
-		Scan(&encryptedValue, &encryptedMetadata); queryErr != nil {
+		`SELECT value, COALESCE(metadata_json,''), COALESCE(last_refresh_at,0) FROM cookies WHERE id=?`, cookieID).
+		Scan(&encryptedValue, &encryptedMetadata, &data.LastRefreshAt); queryErr != nil {
 		if errors.Is(queryErr, sql.ErrNoRows) {
 			return CookieRuntimeData{}, ErrNotFound
 		}
@@ -310,8 +314,8 @@ func (c *Cookies) GetCookiePlatformRuntimeData(ctx context.Context, cookieID str
 	var encryptedValue, encryptedMetadata string
 	// queryErr 表示账号不存在或平台运行时查询失败的原因。
 	if queryErr := c.DB.QueryRowContext(ctx,
-		`SELECT id, user_id, value, COALESCE(show_browser,0), COALESCE(metadata_json,'') FROM cookies WHERE id=?`, cookieID).
-		Scan(&data.ID, &data.UserID, &encryptedValue, &showBrowser, &encryptedMetadata); queryErr != nil {
+		`SELECT id, user_id, value, COALESCE(show_browser,0), COALESCE(metadata_json,''), COALESCE(last_refresh_at,0) FROM cookies WHERE id=?`, cookieID).
+		Scan(&data.ID, &data.UserID, &encryptedValue, &showBrowser, &encryptedMetadata, &data.LastRefreshAt); queryErr != nil {
 		if errors.Is(queryErr, sql.ErrNoRows) {
 			return CookiePlatformRuntimeData{}, ErrNotFound
 		}

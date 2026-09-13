@@ -146,6 +146,20 @@ func TestChatSenderForwardsToRuntime(t *testing.T) {
 	}
 }
 
+// TestChatSenderPreservesDefiniteNotSentError 验证运行时明确未发送错误不会被误判为不确定结果。
+func TestChatSenderPreservesDefiniteNotSentError(t *testing.T) {
+	// sender 是返回确定未发送错误的运行时包装器。
+	sender := chatSender{sender: &coverageAutomationSender{sendErr: automation.ErrMessageNotSent}}
+	// err 保存应用层发送器透传后的错误链。
+	err := sender.SendText(context.Background(), "chat", "buyer", "text", "key")
+	if !errors.Is(err, automation.ErrMessageNotSent) {
+		t.Fatalf("确定未发送错误未保留: %v", err)
+	}
+	if errors.Is(err, chatapp.ErrSendUncertain) {
+		t.Fatalf("确定未发送错误被误判为不确定: %v", err)
+	}
+}
+
 // TestChatItemCatalogMapsRoleAndPersistsUpdatedCookie 验证商品目录适配器映射官网角色并收口 Cookie 更新。
 func TestChatItemCatalogMapsRoleAndPersistsUpdatedCookie(t *testing.T) {
 	// store 和 cleanup 是带测试账号的隔离 SQLite 存储及释放函数。

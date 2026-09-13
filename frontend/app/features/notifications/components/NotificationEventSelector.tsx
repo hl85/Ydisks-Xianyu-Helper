@@ -24,7 +24,7 @@ export const NotificationEventSelector: React.FC<NotificationEventSelectorProps>
     <div className="space-y-3">
       <div>
         <label className="block text-sm font-bold text-gray-800">通知内容</label>
-        <p className="text-xs text-gray-500 mt-1">不选择表示接收全部通知；选择后仅接收勾选类型。</p>
+        <p className="text-xs text-gray-500 mt-1">不选择表示接收全部通知；选择后仅接收勾选类型。四类自动化任务可分别关闭。</p>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {notificationEvents.map(

@@ -202,6 +202,10 @@ func classifyChatPlatformError(err error) error {
 	if err == nil {
 		return nil
 	}
+	// 确定未发送的错误发生在平台动作不可回收之前，必须保留可安全重试语义。
+	if errors.Is(err, automation.ErrMessageNotSent) {
+		return err
+	}
 	if ws.SendResultKind(err) == ws.SendUncertain {
 		return fmt.Errorf("%w: %v", chatapp.ErrSendUncertain, err)
 	}

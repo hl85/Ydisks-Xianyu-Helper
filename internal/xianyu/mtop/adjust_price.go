@@ -72,7 +72,7 @@ func (c *ClientImpl) AdjustOrderPriceContext(ctx context.Context, cookiesStr, or
 
 		// MTop 通常会在 token 过期响应中通过 Set-Cookie 下发新签名 token；
 		// 未下发时主动刷新一次 token 再重试。
-		if currentCookies == previousCookies {
+		if !mtopTokenCookieChanged(previousCookies, currentCookies) {
 			// refreshed、refreshErr 分别是 token 主动刷新结果和刷新失败原因。
 			refreshed, refreshErr := c.RefreshTokenContext(ctx, currentCookies)
 			if refreshErr != nil {

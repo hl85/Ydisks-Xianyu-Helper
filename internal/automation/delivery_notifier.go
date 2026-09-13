@@ -16,6 +16,12 @@ type deliveryNotifier struct {
 	logger *slog.Logger
 }
 
+// triggerAwareNotifier 定义能够按自动化触发类别发送终态通知的可选能力。
+type triggerAwareNotifier interface {
+	// NotifyAutomationRunForTrigger 按具体自动化触发类别写入终态通知。
+	NotifyAutomationRunForTrigger(ctx context.Context, triggerType string, runID int64, accountID, buyerID, itemID, status, message, chatID string)
+}
+
 // notifyResult 根据规则执行终态发送通知；只要运行进入 success，就通知自动化已完成，避免 sent_count 为零时静默丢失结果。
 // runID 与 status 会传给持久化 outbox，防止恢复扫描对同一运行重复排队。
 func (n deliveryNotifier) notifyResult(ctx context.Context, task Task, runID int64, status string, sent int, errMsg string) {
@@ -40,15 +46,24 @@ func (n deliveryNotifier) notifyResult(ctx context.Context, task Task, runID int
 	if triggerName == "" {
 		triggerName = task.TriggerType
 	}
+	// notifyForTrigger 让新通知器按四类自动化任务分别过滤；旧替身或兼容实现继续使用统一入口。
+	notifyForTrigger := func(notificationMessage string) {
+		// triggerAware 表示通知器是否支持细分事件；ok 表示类型断言是否成功。
+		if triggerAware, ok := notifier.(triggerAwareNotifier); ok {
+			triggerAware.NotifyAutomationRunForTrigger(ctx, task.TriggerType, runID, task.AccountID, task.BuyerID, task.ItemID, status, notificationMessage, task.ChatID)
+			return
+		}
+		notifier.NotifyAutomationRun(ctx, runID, task.AccountID, task.BuyerID, task.ItemID, status, notificationMessage, task.ChatID)
+	}
 	if status == "success" {
 		// message 是成功通知正文。
 		message := fmt.Sprintf("✅ %s成功（订单 %s，已发送 %d 条）", triggerName, task.OrderID, sent)
-		notifier.NotifyAutomationRun(ctx, runID, task.AccountID, task.BuyerID, task.ItemID, status, message, task.ChatID)
+		notifyForTrigger(message)
 		return
 	}
 	// message 是失败或人工核对通知正文。
 	message := fmt.Sprintf("🚨 %s失败（订单 %s）：%s", triggerName, task.OrderID, errMsg)
-	notifier.NotifyAutomationRun(ctx, runID, task.AccountID, task.BuyerID, task.ItemID, status, message, task.ChatID)
+	notifyForTrigger(message)
 }
 
 // notifyRunNeedsReview 通知运行需要人工核对，并复用统一结果通知格式。

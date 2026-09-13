@@ -43,9 +43,14 @@ func (e *automationActionExecutor) sendCardWithProof(ctx context.Context, task T
 	// sent 是已经成功发送的卡密数量。
 	sent := 0
 	// proof 保存已经成功发送的文本和图片凭证。
-	proof := shipmentDeliveryProof{}
+	proof := shipmentDeliveryProof{expectedUnits: count}
 	// i 表示当前卡密发送序号。
 	for i := 0; i < count; i++ {
+		// executionErr 阻止失权运行继续取下一份卡密，已发送的 proof 必须随错误返回。
+		if executionErr := checkRunExecution(ctx); executionErr != nil {
+			return actionExecutionResult{sent: sent, proof: proof}, executionErr
+		}
+
 		// content、imageURL、readErr 分别是当前卡密组可发送的文本、图片地址和读取配置失败原因。
 		content, imageURL, readErr := e.cardContent(ctx, card)
 		if readErr != nil {
@@ -55,7 +60,7 @@ func (e *automationActionExecutor) sendCardWithProof(ctx context.Context, task T
 			// sendErr 保存图片消息发送错误。
 			if sendErr := e.sendImage(ctx, task, imageURL, card.ID); sendErr != nil {
 				// reviewProof 保存图片传输结果未知时的原始地址；不重新读取卡密组，避免人工补发改变内容。
-				reviewProof := shipmentDeliveryProof{picList: []string{imageURL}, messages: []db.AutomationDeliveryMessage{{Kind: "image", Content: imageURL}}}
+				reviewProof := shipmentDeliveryProof{unknownUnits: 1, picList: []string{imageURL}, messages: []db.AutomationDeliveryMessage{{Kind: "image", Content: imageURL}}}
 				if errors.Is(sendErr, ErrMessageNotSent) {
 					return actionExecutionResult{sent: sent, proof: proof}, classifyMessageSendError(sendErr)
 				}
@@ -70,7 +75,7 @@ func (e *automationActionExecutor) sendCardWithProof(ctx context.Context, task T
 			// sendErr 保存文字消息发送错误。
 			if sendErr := e.sendText(ctx, task, renderedContent); sendErr != nil {
 				// reviewProof 保存结果未知的最终渲染文本；卡密补发必须使用该文本而非再次模板渲染。
-				reviewProof := shipmentDeliveryProof{tradeText: renderedContent, messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: renderedContent}}}
+				reviewProof := shipmentDeliveryProof{unknownUnits: 1, tradeText: renderedContent, messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: renderedContent}}}
 				if errors.Is(sendErr, ErrMessageNotSent) {
 					return actionExecutionResult{sent: sent, proof: proof}, classifyMessageSendError(sendErr)
 				}
@@ -83,6 +88,7 @@ func (e *automationActionExecutor) sendCardWithProof(ctx context.Context, task T
 			return actionExecutionResult{sent: sent, proof: proof}, fmt.Errorf("卡密组 %d 没有可发送内容", card.ID)
 		}
 		sent++
+		proof.preparedUnits++
 	}
 	return actionExecutionResult{sent: sent, proof: proof}, nil
 }
@@ -100,9 +106,14 @@ func (e *automationActionExecutor) sendAPICardWithProof(ctx context.Context, tas
 	// sent 是已经完成 API 获取和买家消息发送的单位数量。
 	sent := 0
 	// proof 保存已经成功发送的 API 卡密文本。
-	proof := shipmentDeliveryProof{}
+	proof := shipmentDeliveryProof{expectedUnits: count}
 	// unitIndex 表示从 1 开始的当前 API 发货单位序号。
 	for unitIndex := 1; unitIndex <= count; unitIndex++ {
+		// executionErr 阻止失权运行继续取下一份卡密，已发送的 proof 必须随错误返回。
+		if executionErr := checkRunExecution(ctx); executionErr != nil {
+			return actionExecutionResult{sent: sent, proof: proof}, executionErr
+		}
+
 		// result、fetchErr 保存当前单位的 API 响应与请求错误。
 		result, fetchErr := fetcher.Fetch(ctx, APICardRequest{
 			Config: card.APIConfig, TriggerKey: buildTriggerKey(task), ActionID: action.ID, CardID: card.ID,
@@ -122,12 +133,13 @@ func (e *automationActionExecutor) sendAPICardWithProof(ctx context.Context, tas
 		// sendErr 保存已取得卡密后向买家发送消息的结果；此时失败不能安全重放 API 请求。
 		if sendErr := e.sendText(ctx, task, result.Content); sendErr != nil {
 			// reviewProof 保存 API 已返回的唯一内容；即使发送结果未知也只能重发该快照，不能再次调用 API。
-			reviewProof := shipmentDeliveryProof{tradeText: result.Content, messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: result.Content}}}
+			reviewProof := shipmentDeliveryProof{unknownUnits: 1, tradeText: result.Content, messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: result.Content}}}
 			return actionExecutionResult{sent: sent, proof: proof, reviewProof: reviewProof}, uncertainAction(sendErr)
 		}
 		proof.tradeText = appendTradeText(proof.tradeText, result.Content)
 		proof.messages = append(proof.messages, db.AutomationDeliveryMessage{Kind: "text", Content: result.Content})
 		sent++
+		proof.preparedUnits++
 	}
 	return actionExecutionResult{sent: sent, proof: proof}, nil
 }
@@ -137,9 +149,14 @@ func (e *automationActionExecutor) sendDataCardWithProof(ctx context.Context, ta
 	// sent 是已经成功发送的数据卡密数量。
 	sent := 0
 	// proof 保存已经成功发送的数据卡密文本。
-	proof := shipmentDeliveryProof{}
+	proof := shipmentDeliveryProof{expectedUnits: count}
 	// i 表示当前数据卡密消费序号。
 	for i := 0; i < count; i++ {
+		// executionErr 阻止失权运行继续取下一份卡密，已发送的 proof 必须随错误返回。
+		if executionErr := checkRunExecution(ctx); executionErr != nil {
+			return actionExecutionResult{sent: sent, proof: proof}, executionErr
+		}
+
 		// unlock 释放当前卡密组的并发消费锁；锁只覆盖本地库存操作。
 		unlock := e.lockCard(card.ID)
 		// content 是从库存中原子消费出的数据卡密。
@@ -160,17 +177,20 @@ func (e *automationActionExecutor) sendDataCardWithProof(ctx context.Context, ta
 					restoreErr := e.store.Cards.RestoreBatchData(ctx, card.ID, content)
 					restoreUnlock()
 					if restoreErr != nil {
+						// proof.refillPending 锁定本次已消费但恢复失败的库存，防止人工补发再次取卡造成重复扣减。
+						proof.refillPending = true
 						return actionExecutionResult{sent: sent, proof: proof}, uncertainAction(errors.Join(sendErr, fmt.Errorf("恢复未发送卡密库存: %w", restoreErr)))
 					}
 					return actionExecutionResult{sent: sent, proof: proof}, sendErr
 				}
 				// 请求已交给传输层后无法判断远端是否收到，保留消费状态并人工核对。
 				// reviewProof 保存已消费但发送结果未知的数据卡密，补发必须直接使用该内容而不能再次扣库存。
-				reviewProof := shipmentDeliveryProof{tradeText: renderedContent, messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: renderedContent}}}
+				reviewProof := shipmentDeliveryProof{unknownUnits: 1, tradeText: renderedContent, messages: []db.AutomationDeliveryMessage{{Kind: "text", Content: renderedContent}}}
 				return actionExecutionResult{sent: sent, proof: proof, reviewProof: reviewProof}, uncertainAction(sendErr)
 			}
 			proof.tradeText = appendTradeText(proof.tradeText, renderedContent)
 			proof.messages = append(proof.messages, db.AutomationDeliveryMessage{Kind: "text", Content: renderedContent})
+			proof.preparedUnits++
 		}
 		sent++
 	}

@@ -3,6 +3,7 @@ package mtop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -100,6 +101,30 @@ func (c *ClientImpl) RateBuyer(ctx context.Context, cookiesStr, tradeID, feedbac
 	return &AccountTaskResult{Success: true, Message: firstRet(decoded.Ret), UpdatedCookies: updated}, nil
 }
 
+// IsRateOrderExpiredErr 判断评价接口是否明确拒绝超过平台评价期限的订单；该错误属于永久业务失败，不应再次请求评价接口。
+func IsRateOrderExpiredErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	// responseErr 保存统一 MTOP 错误中的原始 ret，优先使用结构化平台错误避免依赖展示文本。
+	var responseErr *MTopResponseError
+	if errors.As(err, &responseErr) {
+		// ret 表示平台返回的一条错误标记，包含错误码和面向用户的业务原因。
+		for _, ret := range responseErr.Ret {
+			// normalizedRet 保存平台错误码和原因的小写副本，用于兼容“超出/超过”两种文案。
+			normalizedRet := strings.ToLower(ret)
+			if strings.Contains(normalizedRet, "fail_biz_bad_request") &&
+				(strings.Contains(normalizedRet, "超出30天的订单不允许评价") || strings.Contains(normalizedRet, "超过30天的订单不允许评价")) {
+				return true
+			}
+		}
+	}
+	// message 兼容测试替身或历史调用方只返回错误文本的场景；必须同时包含平台错误码和期限原因。
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "fail_biz_bad_request") &&
+		(strings.Contains(message, "超出30天的订单不允许评价") || strings.Contains(message, "超过30天的订单不允许评价"))
+}
+
 // PolishItem 封装Polish商品业务协调。
 func (c *ClientImpl) PolishItem(ctx context.Context, cookiesStr, itemID string) (*AccountTaskResult, error) {
 	// decoded、updated、err 用于本次流程后续判断的decoded、updated、err
@@ -159,6 +184,8 @@ func (c *ClientImpl) accountTaskRequest(ctx context.Context, cookiesStr, endpoin
 	}
 	// lastFailure 保存最后一次可诊断的 MTOP 失败，供 Token 重试耗尽时返回完整原因。
 	var lastFailure error
+	// tokenRefreshed 标记本次业务请求是否已经完成签名 Cookie 轮换，供成功重试日志区分首次请求。
+	tokenRefreshed := false
 	for // attempt 用于本次流程后续判断的尝试次数
 	attempt := 0; attempt < 3; attempt++ {
 		// previousCookies 记录本次请求前的 Cookie，用于判断响应是否已完成 Token 轮换。
@@ -169,6 +196,9 @@ func (c *ClientImpl) accountTaskRequest(ctx context.Context, cookiesStr, endpoin
 		failure := err
 		if err == nil {
 			if hasMTopSuccess(decoded.Ret) {
+				if tokenRefreshed {
+					c.logInfo("MTOP Token 刷新后业务接口重试成功", "api", api, "attempt", attempt+1)
+				}
 				return decoded, updated, nil
 			}
 			failure = c.mtopResponseFailure(api, http.StatusOK, decoded.Ret, "")
@@ -180,13 +210,23 @@ func (c *ClientImpl) accountTaskRequest(ctx context.Context, cookiesStr, endpoin
 		if updated != "" {
 			current = updated
 		}
-		if current == previousCookies {
+		if mtopTokenCookieChanged(previousCookies, current) {
+			tokenRefreshed = true
+			c.logInfo("MTOP Token 刷新成功", "api", api, "source", "业务接口响应 Cookie")
+		} else {
 			// refreshed、refreshErr 用于本次流程后续判断的refreshed、refreshErr
 			refreshed, refreshErr := c.RefreshTokenContext(ctx, current)
 			if refreshErr != nil {
 				return nil, current, fmt.Errorf("刷新 mtop token: %w", refreshErr)
 			}
+			if refreshed == nil || !mtopTokenCookieChanged(current, refreshed.UpdatedCookies) {
+				// tokenRefreshErr 保留原始 Token 过期分类，让上层进入账号级恢复而不是重复发送同一旧签名。
+				tokenRefreshErr := fmt.Errorf("%s token 刷新成功但签名 Cookie 未轮换", api)
+				return nil, current, errors.Join(failure, tokenRefreshErr)
+			}
 			current = refreshed.UpdatedCookies
+			tokenRefreshed = true
+			c.logInfo("MTOP Token 刷新成功", "api", api, "source", "Token 接口")
 		}
 		if // err 用于本次流程后续判断的err
 		err := sleepCtx(ctx, MTopRetryGap); err != nil {

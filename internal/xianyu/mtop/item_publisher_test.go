@@ -129,7 +129,7 @@ func TestItemSyncTotalConsistency(t *testing.T) {
 // TestItemSyncRejectsMalformedPages 验证异常或不完整页不能变成远端全集，导致本地商品软删除；t 管理本地服务。
 func TestItemSyncRejectsMalformedPages(t *testing.T) {
 	// body 是不能安全参与全量同步的页面内容。
-	for _, body := range []string{`{}`, `{"cardList":null}`, `{"cardList":[null]}`, `{"cardList":[{}]}`, `{"cardList":[{"cardData":{}}]}`, `{"cardList":[],"pageCount":3}`, `{"cardList":[],"totalCount":1}`, `{"cardList":[{"cardData":{"id":"item"}}],"pageCount":1,"totalCount":2}`} {
+	for _, body := range []string{`{"cardList":{}}`, `{"cardList":null}`, `{"cardList":[null]}`, `{"cardList":[{}]}`, `{"cardList":[{"cardData":{}}]}`, `{"cardList":[],"pageCount":3}`, `{"cardList":[],"totalCount":1}`, `{"cardList":[{"cardData":{"id":"item"}}],"pageCount":1,"totalCount":2}`} {
 		// server 按 body 返回平台成功状态下的异常数据，w 写入响应。
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			fmt.Fprintf(w, `{"ret":["SUCCESS::调用成功"],"data":%s}`, body)
@@ -158,5 +158,21 @@ func TestItemSyncRejectsRepeatedPages(t *testing.T) {
 	result, err := client.FetchAllItems(context.Background(), consignCookies, 1, 3)
 	if err == nil || result != nil {
 		t.Fatal("重复商品分页未被拒绝")
+	}
+}
+
+// TestItemSyncAcceptsOmittedCardsWithPagination 保留原 pageCount=2 夹具并按权威空列表协议断言成功；t 管理本地 HTTP 服务，显式畸形数组仍由负向测试拒绝。
+func TestItemSyncAcceptsOmittedCardsWithPagination(t *testing.T) {
+	// server 返回省略 cardList 且没有非零商品总数的成功响应，页数不能替代商品数量。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { // w 只写入隔离的空商品成功夹具。
+		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"pageCount":2}}`)
+	}))
+	defer server.Close()
+	// client 仅访问测试服务，不调用真实账号。
+	client := &ClientImpl{HTTPClient: &http.Client{Transport: &rewriteTransport{base: server.Client().Transport, target: server.URL}}}
+	// result、err 保存全量查询结果，不能由页数制造商品或继续请求不存在的下一页。
+	result, err := client.FetchAllItems(context.Background(), consignCookies, 20, 3)
+	if err != nil || result == nil || result.TotalCount != 0 || result.TotalPages != 1 || len(result.Items) != 0 {
+		t.Fatalf("成功省略 cardList 必须得到完整空列表: err=%v", err)
 	}
 }

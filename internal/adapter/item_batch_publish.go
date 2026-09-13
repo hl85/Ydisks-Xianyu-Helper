@@ -26,7 +26,7 @@ type ItemBatchPublishPort struct {
 	logger *slog.Logger
 	// updateRunningCookie 将平台返回的新 Cookie 同步到运行中的账号实例。
 	updateRunningCookie func(context.Context, string, string)
-	// recoverExpiredSession 在平台报告会话失效时触发账号恢复协调。
+	// recoverExpiredSession 在平台报告 Session 或 MTOP Token 失效时触发账号恢复协调。
 	recoverExpiredSession func(context.Context, string, error)
 	// readImage 从受控上传目录读取并校验本地图片。
 	readImage ReadPublishImageFile
@@ -413,7 +413,12 @@ func firstBatchNonEmpty(values ...string) string {
 // 确保批量远端适配器实现应用层定义的端口。
 var _ itemapp.BatchPublishPort = (*ItemBatchPublishPort)(nil)
 
-// IsSessionExpiredError 判断批量发布错误是否要求终止剩余明细并进入账号恢复。
+// IsSessionExpiredError 保留批量发布旧接口名，并覆盖 Session 与 MTOP Token 失效。
 func IsSessionExpiredError(err error) bool {
-	return mtop.IsSessionExpiredErr(err)
+	return IsCredentialExpiredError(err)
+}
+
+// IsCredentialExpiredError 判断批量发布错误是否要求终止剩余明细并进入账号恢复。
+func IsCredentialExpiredError(err error) bool {
+	return mtop.IsCredentialRefreshableErr(err)
 }

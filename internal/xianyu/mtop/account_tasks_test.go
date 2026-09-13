@@ -1,8 +1,11 @@
 package mtop
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -59,6 +62,22 @@ func TestAccountTaskEndpointsAndParsing(t *testing.T) {
 	}
 }
 
+// TestIsRateOrderExpiredErrRecognizesPermanentPlatformFailure 验证超过评价期限的结构化及包装错误会被识别为永久失败，其他业务错误不会误判。
+func TestIsRateOrderExpiredErrRecognizesPermanentPlatformFailure(t *testing.T) {
+	// expiredErr 保存平台明确拒绝超期订单的 MTOP 错误。
+	expiredErr := &MTopResponseError{API: "mtop.taobao.idle.rate.create", Kind: MTopErrorBusiness, Ret: []string{"FAIL_BIZ_BAD_REQUEST::超出30天的订单不允许评价||rate failed"}}
+	// wrappedErr 保存经过上层包装的同一平台错误，验证 errors.As 链路仍可识别。
+	wrappedErr := fmt.Errorf("评价动作失败: %w", expiredErr)
+	if !IsRateOrderExpiredErr(expiredErr) || !IsRateOrderExpiredErr(wrappedErr) {
+		t.Fatalf("超期评价错误未识别: direct=%v wrapped=%v", IsRateOrderExpiredErr(expiredErr), IsRateOrderExpiredErr(wrappedErr))
+	}
+	// otherErr 保存错误码或原因缺失的普通业务失败，必须继续走普通失败重试语义。
+	otherErr := &MTopResponseError{API: "mtop.taobao.idle.rate.create", Kind: MTopErrorBusiness, Ret: []string{"FAIL_BIZ_BAD_REQUEST::订单状态不允许评价"}}
+	if IsRateOrderExpiredErr(otherErr) || IsRateOrderExpiredErr(fmt.Errorf("FAIL_BIZ_BAD_REQUEST::订单状态不允许评价")) {
+		t.Fatal("普通评价业务错误不应被识别为超期永久失败")
+	}
+}
+
 // TestAccountTaskRequestUsesSignedForm 封装Test账号任务请求UsesSigned表单业务协调。
 func TestAccountTaskRequestUsesSignedForm(t *testing.T) {
 	// server 用于本次流程后续判断的server
@@ -81,6 +100,75 @@ func TestAccountTaskRequestUsesSignedForm(t *testing.T) {
 	result, err := client.PolishItem(context.Background(), "unb=123; _m_h5_tk=token_1", "item-1")
 	if err != nil || !result.Success {
 		t.Fatalf("duplicate polish should be success: result=%+v err=%v", result, err)
+	}
+}
+
+// TestAccountTaskRequestRefreshesWhenOnlyUnrelatedCookieChanges 验证令牌过期响应仅变化普通 Cookie 时仍主动刷新签名令牌。
+func TestAccountTaskRequestRefreshesWhenOnlyUnrelatedCookieChanges(t *testing.T) {
+	// rateCalls、tokenCalls 记录业务接口和官方 Token 接口的请求次数。
+	rateCalls, tokenCalls := 0, 0
+	// server 模拟先返回令牌过期并变化普通 Cookie，再通过刷新后的令牌返回成功。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("api") == "mtop.taobao.idlemessage.pc.login.token" {
+			tokenCalls++
+			w.Header().Set("Set-Cookie", "_m_h5_tk=fresh_token_2; Path=/")
+			_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{"accessToken":"access-1"}}`))
+			return
+		}
+		rateCalls++
+		if rateCalls == 1 {
+			w.Header().Set("Set-Cookie", "unrelated=rotated; Path=/")
+			_, _ = w.Write([]byte(`{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"],"data":{}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{"module":{"items":[]}}}`))
+	}))
+	defer server.Close()
+	// logs 捕获脱敏的续期诊断，验证实际轮换和后续重试都可被观察。
+	var logs bytes.Buffer
+	// client 使用本地 HTTP 服务替代业务接口和官方 Token 接口，并接入测试日志器。
+	client := &ClientImpl{
+		HTTPClient:  server.Client(),
+		Logger:      slog.New(slog.NewTextHandler(&logs, nil)),
+		RateListURL: server.URL + "/rate",
+		TokenURL:    server.URL + "/token",
+	}
+	// result、err 保存令牌刷新后业务请求的结果和错误。
+	result, err := client.FetchPendingRateOrders(context.Background(), "unb=123; _m_h5_tk=old_token_1", 1, 50)
+	if err != nil || result == nil || rateCalls != 2 || tokenCalls != 1 {
+		t.Fatalf("令牌过期未按要求刷新并重试: result=%+v rate_calls=%d token_calls=%d err=%v", result, rateCalls, tokenCalls, err)
+	}
+	if !strings.Contains(logs.String(), "MTOP Token 刷新成功") || !strings.Contains(logs.String(), "MTOP Token 刷新后业务接口重试成功") {
+		t.Fatalf("缺少 Token 刷新成功或重试成功日志: %s", logs.String())
+	}
+}
+
+// TestAccountTaskRequestRejectsTokenSuccessWithoutSigningCookieRotation 验证 Token 接口虽返回 accessToken 但未轮换签名 Cookie 时不会重复发送旧签名。
+func TestAccountTaskRequestRejectsTokenSuccessWithoutSigningCookieRotation(t *testing.T) {
+	// rateCalls、tokenCalls 记录业务接口和 Token 接口调用次数，确认无效刷新只触发一次各自请求。
+	rateCalls, tokenCalls := 0, 0
+	// server 模拟平台返回 Token 接口成功但没有新的 _m_h5_tk，业务接口始终拒绝旧签名。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("api") == "mtop.taobao.idlemessage.pc.login.token" {
+			tokenCalls++
+			_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{"accessToken":"access-1"}}`))
+			return
+		}
+		rateCalls++
+		_, _ = w.Write([]byte(`{"ret":["FAIL_SYS_TOKEN_EXOIRED::令牌过期"],"data":{}}`))
+	}))
+	defer server.Close()
+	// client 使用本地服务替代业务接口和官方 Token 接口。
+	client := &ClientImpl{HTTPClient: server.Client(), RateListURL: server.URL + "/rate", TokenURL: server.URL + "/token"}
+	// result、err 保存刷新未轮换签名 Cookie 时的结果和错误。
+	result, err := client.FetchPendingRateOrders(context.Background(), "unb=123; _m_h5_tk=old_token_1", 1, 50)
+	if result != nil || err == nil || !IsMTopTokenExpiredErr(err) {
+		t.Fatalf("未轮换签名 Cookie 应保留 Token 过期分类: result=%+v err=%v", result, err)
+	}
+	if rateCalls != 1 || tokenCalls != 1 {
+		t.Fatalf("旧签名不应重复发送: rate_calls=%d token_calls=%d", rateCalls, tokenCalls)
 	}
 }
 

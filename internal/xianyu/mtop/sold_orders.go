@@ -82,7 +82,7 @@ func (c *ClientImpl) FetchSoldOrdersPage(ctx context.Context, cookies string, pa
 		session := cookieSessionFromContext(ctx); session != nil {
 			currentCookies, _, _ = session.State()
 		}
-		if currentCookies == previousCookies {
+		if !mtopTokenCookieChanged(previousCookies, currentCookies) {
 			// refreshed、refreshErr 保存主动刷新 MTOP 签名 Token 的结果及错误。
 			refreshed, refreshErr := c.RefreshTokenContext(ctx, currentCookies)
 			if refreshErr != nil {

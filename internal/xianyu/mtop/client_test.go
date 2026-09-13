@@ -90,6 +90,31 @@ func TestNewClientUsesGoHTTPByDefault(t *testing.T) {
 	}
 }
 
+// TestMTopTokenCookieChangedIgnoresUnrelatedCookieChanges 验证签名令牌判断只关注非空 _m_h5_tk 轮换。
+func TestMTopTokenCookieChangedIgnoresUnrelatedCookieChanges(t *testing.T) {
+	// cases 覆盖普通 Cookie 变化、签名令牌轮换、令牌缺失和相同值重复写回。
+	cases := []struct {
+		name     string
+		previous string
+		current  string
+		changed  bool
+	}{
+		{name: "unrelated", previous: "_m_h5_tk=token-a; sdkSilent=1", current: "_m_h5_tk=token-a; sdkSilent=2", changed: false},
+		{name: "expiry-only", previous: "_m_h5_tk=token-a_100", current: "_m_h5_tk=token-a_200", changed: false},
+		{name: "rotated", previous: "_m_h5_tk=token-a", current: "_m_h5_tk=token-b", changed: true},
+		{name: "missing", previous: "_m_h5_tk=token-a", current: "sdkSilent=2", changed: false},
+		{name: "same", previous: "_m_h5_tk=token-a", current: "_m_h5_tk=token-a", changed: false},
+	}
+	// testCase 逐项承载签名令牌变化样例，避免把普通 Cookie 更新误判为恢复。
+	for _, testCase := range cases {
+		// changed 保存当前样例是否应被识别为有效签名轮换。
+		changed := MTopTokenCookieChanged(testCase.previous, testCase.current)
+		if changed != testCase.changed {
+			t.Errorf("%s changed=%v want %v", testCase.name, changed, testCase.changed)
+		}
+	}
+}
+
 // TestRefreshTokenRetriesOnceWithUpdatedCookie 封装TestRefresh令牌RetriesOnceWithUpdated登录凭证业务协调。
 func TestRefreshTokenRetriesOnceWithUpdatedCookie(t *testing.T) {
 	// requests 用于本次流程后续判断的请求列表
@@ -279,6 +304,9 @@ func TestIsTokenExpiredRet(t *testing.T) {
 		{[]string{"FAIL_SYS_TOKEN_EXOIRED::令牌过期"}, true},
 		{[]string{"FAIL_SYS_TOKEN_EXPIRED::令牌过期"}, true},
 		{[]string{"FAIL_SYS_SESSION_EXPIRED::会话过期"}, false},
+		{[]string{"SID_INVALID::会话无效"}, false},
+		{[]string{"AUTH_REJECT::认证拒绝"}, false},
+		{[]string{"NEED_LOGIN::需要登录"}, false},
 		{[]string{"FAIL_SYS_USER_VALIDATE::非法请求TOKEN"}, false},
 		{[]string{"SUCCESS::调用成功"}, false},
 		{[]string{"FAIL_BIZ_ORDER_STATUS_ERROR::订单状态错误"}, false},
@@ -311,6 +339,35 @@ func TestSessionExpiredRetIsSeparateFromTokenExpiry(t *testing.T) {
 	}
 }
 
+// TestOfficialSessionExpiredRetCodes 验证官网 lib-mtop 统一识别的四类 Session 失效码。
+func TestOfficialSessionExpiredRetCodes(t *testing.T) {
+	// cases 保存官网中会被归入 SESSION_EXPIRED 的平台返回码。
+	cases := []string{
+		"SESSION_EXPIRED",
+		"SID_INVALID",
+		"AUTH_REJECT",
+		"NEED_LOGIN",
+		"SESSION_EXPIRED::会话过期",
+		"SID_INVALID::会话无效",
+		"AUTH_REJECT::认证拒绝",
+		"NEED_LOGIN::需要登录",
+	}
+	// ret 表示当前待分类的平台返回码。
+	for _, ret := range cases {
+		if !IsSessionExpiredErr(errors.New(ret)) {
+			t.Errorf("非类型化官方 Session 错误未识别: %q", ret)
+		}
+		if !isSessionExpiredRet([]string{ret}) {
+			t.Errorf("官方 Session 失效码未识别: %q", ret)
+		}
+		// failure 保存统一错误分类，确认这些返回码不会误入 Token 过期路径。
+		failure := (&ClientImpl{}).mtopResponseFailure("test", http.StatusOK, []string{ret}, "平台返回失败")
+		if !IsSessionExpiredErr(failure) || IsMTopTokenExpiredErr(failure) {
+			t.Errorf("官方 Session 失效码分类错误: ret=%q err=%v", ret, failure)
+		}
+	}
+}
+
 // TestIsSessionExpiredErr 封装TestIs会话ExpiredErr业务协调。
 func TestIsSessionExpiredErr(t *testing.T) {
 	// cases 用于本次流程后续判断的cases
@@ -331,6 +388,20 @@ func TestIsSessionExpiredErr(t *testing.T) {
 		got := IsSessionExpiredErr(c.err); got != c.want {
 			t.Errorf("case %d: got %v want %v (err=%v)", i, got, c.want, c.err)
 		}
+	}
+}
+
+// TestIsCredentialRefreshableErr 覆盖 Session 与仅 MTOP Token 失效都进入统一凭证恢复入口的分类边界。
+func TestIsCredentialRefreshableErr(t *testing.T) {
+	// tokenErr 是可通过登录态 Cookie 恢复的 MTOP 签名 Token 失效错误。
+	tokenErr := &MTopResponseError{Kind: MTopErrorTokenExpired, API: "token", HTTPStatus: http.StatusOK}
+	// sessionErr 是需要协议续期或重新登录的 Session 失效错误。
+	sessionErr := &SessionExpiredError{API: "session", Ret: []string{"FAIL_SYS_SESSION_EXPIRED::Session过期"}}
+	if !IsCredentialRefreshableErr(tokenErr) || !IsCredentialRefreshableErr(sessionErr) {
+		t.Fatal("Token 和 Session 失效都应进入统一凭证恢复入口")
+	}
+	if IsCredentialRefreshableErr(errors.New("普通业务失败")) {
+		t.Fatal("普通业务失败不应触发凭证恢复")
 	}
 }
 

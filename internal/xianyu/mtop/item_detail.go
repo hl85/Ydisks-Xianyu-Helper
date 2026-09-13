@@ -77,7 +77,7 @@ func (c *ClientImpl) fetchItemDetail(ctx context.Context, cookies, itemID string
 		if attempt == 3 {
 			return nil, fmt.Errorf("商品详情接口 Token 重试失败: %w", err)
 		}
-		if currentCookies == previousCookies {
+		if !mtopTokenCookieChanged(previousCookies, currentCookies) {
 			// refreshed、refreshErr 保存主动刷新 MTOP 签名 Token 的结果及错误。
 			refreshed, refreshErr := c.RefreshTokenContext(ctx, currentCookies)
 			if refreshErr != nil {

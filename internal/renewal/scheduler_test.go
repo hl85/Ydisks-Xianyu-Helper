@@ -182,8 +182,8 @@ func TestSchedulerIntervalsAligned(t *testing.T) {
 	}
 }
 
-// TestPendingAPIRenewLogsPendingAndRestartsAfterLateCookie 封装TestPendingAPIRenewLogsPendingAndRestartsAfterLate登录凭证业务协调。
-func TestPendingAPIRenewLogsPendingAndRestartsAfterLateCookie(t *testing.T) {
+// TestPendingAPIRenewPreservesFailureAndLateCookie 验证迟到响应只保存 Cookie，终态仍超时失败且不重启账号。
+func TestPendingAPIRenewPreservesFailureAndLateCookie(t *testing.T) {
 	// store、cleanup 用于本次流程后续判断的store、cleanup
 	store, cleanup := newSchedulerTestStore(t)
 	defer cleanup()
@@ -208,14 +208,11 @@ func TestPendingAPIRenewLogsPendingAndRestartsAfterLateCookie(t *testing.T) {
 	got := lastAPIRenewLog(t, store, account.ID).status; got != "pending" {
 		t.Fatalf("Promise 未完成时 status=%q want pending", got)
 	}
-	// deadline 用于本次流程后续判断的deadline
-	deadline := time.Now().Add(time.Second)
-	for starter.restarts.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	// 等待本次 watcher 完成再检查 Cookie、重启次数和日志，避免以重启作为完成信号。
+	s.watchers.Wait()
 	if // got 用于本次流程后续判断的got
-	got := starter.restarts.Load(); got != 1 {
-		t.Fatalf("迟到 Cookie 保存后 restarts=%d want 1", got)
+	got := starter.restarts.Load(); got != 0 {
+		t.Fatalf("迟到 Cookie 保存后不得重启，restarts=%d", got)
 	}
 	// detail、err 用于本次流程后续判断的detail、err
 	detail, err := store.Cookies.GetDetails(context.Background(), account.ID)
@@ -225,24 +222,14 @@ func TestPendingAPIRenewLogsPendingAndRestartsAfterLateCookie(t *testing.T) {
 	if !strings.Contains(detail.Value, "sdkSilent=") {
 		t.Fatalf("迟到 Cookie 未保存: %q", detail.Value)
 	}
-	// finalDeadline 限制 watcher 写入终态日志的等待时间；Restart 返回早于终态日志持久化，不能把重启完成当作 watcher 已收束。
-	finalDeadline := time.Now().Add(time.Second)
-	for time.Now().Before(finalDeadline) {
-		// status 保存当前轮询到的续期日志状态；在迟到响应 watcher 尚未收束时可暂时保持 pending。
-		status := lastAPIRenewLog(t, store, account.ID).status
-		if status == "cookie_updated" {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	// got 保存等待截止后最后一次读取到的状态，便于失败时区分 watcher 未完成和写入错误。
-	if got := lastAPIRenewLog(t, store, account.ID).status; got != "cookie_updated" {
-		t.Fatalf("迟到响应最终状态=%q want cookie_updated", got)
+	// log 保存完成后的日志；业务响应成功不能覆盖 Promise 的超时终态。
+	if log := lastAPIRenewLog(t, store, account.ID); log.status != "failed" || !strings.Contains(log.errorMessage, "超时") {
+		t.Fatalf("迟到响应最终状态异常: %+v", log)
 	}
 }
 
-// TestAPICookieRenewSuccessWithoutCredentialChangeDoesNotRestart 封装TestAPI登录凭证RenewSuccessWithoutCredentialChangeDoesNotRestart业务协调。
-func TestAPICookieRenewSuccessWithoutCredentialChangeDoesNotRestart(t *testing.T) {
+// TestAPICookieRenewSuccessWithoutCredentialChangeRestarts 验证官方成功后无条件 reload，即使 Cookie 值未变化。
+func TestAPICookieRenewSuccessWithoutCredentialChangeRestarts(t *testing.T) {
 	// store、cleanup 用于本次流程后续判断的store、cleanup
 	store, cleanup := newSchedulerTestStore(t)
 	defer cleanup()
@@ -262,8 +249,8 @@ func TestAPICookieRenewSuccessWithoutCredentialChangeDoesNotRestart(t *testing.T
 	s.api = apirenew.Service{HTTPClient: srv.Client(), SilentHasLoginURL: srv.URL, RetryDelay: -1}
 	s.apiCookieRenewOne(context.Background(), "batch-no-change", account)
 	if // got 用于本次流程后续判断的got
-	got := starter.restarts.Load(); got != 0 {
-		t.Fatalf("Cookie 未变化时不应重启账号，restarts=%d", got)
+	got := starter.restarts.Load(); got != 1 {
+		t.Fatalf("续期成功后必须模拟 reload，restarts=%d", got)
 	}
 	if // got 用于本次流程后续判断的got
 	got := lastAPIRenewLog(t, store, account.ID).status; got != "success" {
@@ -271,8 +258,8 @@ func TestAPICookieRenewSuccessWithoutCredentialChangeDoesNotRestart(t *testing.T
 	}
 }
 
-// TestPendingAPIRenewUsesFreshContextForRestart 封装TestPendingAPIRenewUsesFresh上下文ForRestart业务协调。
-func TestPendingAPIRenewUsesFreshContextForRestart(t *testing.T) {
+// TestPendingAPIRenewUsesFreshContextForPersistence 验证请求窗口关闭后仍可保存迟到 Cookie，但不启动重启回调。
+func TestPendingAPIRenewUsesFreshContextForPersistence(t *testing.T) {
 	// store、cleanup 用于本次流程后续判断的store、cleanup
 	store, cleanup := newSchedulerTestStore(t)
 	defer cleanup()
@@ -293,13 +280,14 @@ func TestPendingAPIRenewUsesFreshContextForRestart(t *testing.T) {
 	s := NewScheduler(store, starter, nil, nil)
 	s.api = apirenew.Service{HTTPClient: srv.Client(), SilentHasLoginURL: srv.URL, RetryDelay: -1, PromiseTimeout: 5 * time.Millisecond}
 	s.apiCookieRenewOne(context.Background(), "batch-context", account)
-	// deadline 用于本次流程后续判断的deadline
-	deadline := time.Now().Add(time.Second)
-	for starter.restarts.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	s.watchers.Wait()
+	if starter.restarts.Load() != 0 || starter.ctxAlive.Load() {
+		t.Fatal("迟到响应不应调用重启接口")
 	}
-	if starter.restarts.Load() != 1 || !starter.ctxAlive.Load() {
-		t.Fatalf("迟到响应重启必须使用独立有效上下文: restarts=%d alive=%v", starter.restarts.Load(), starter.ctxAlive.Load())
+	// saved、readErr 只读取人工测试凭证以确认独立持久化上下文仍有效，不打印值。
+	saved, readErr := store.Cookies.GetValue(context.Background(), account.ID)
+	if readErr != nil || !strings.Contains(saved, "sdkSilent=") {
+		t.Fatalf("迟到 Cookie 未使用有效上下文持久化，err=%v", readErr)
 	}
 }
 
@@ -338,6 +326,68 @@ func TestPendingAPIRenewStopsWithSchedulerContext(t *testing.T) {
 	}
 	if strings.Contains(detail.Value, "sdkSilent=") {
 		t.Fatalf("调度器关闭后不应再写入迟到 Cookie: %q", detail.Value)
+	}
+}
+
+// TestAPICookieRenewRejectsStaleResponseAfterConcurrentCookieUpdate 验证定时续期期间的并发凭证写入不会被旧响应覆盖。
+func TestAPICookieRenewRejectsStaleResponseAfterConcurrentCookieUpdate(t *testing.T) {
+	// store、cleanup 保存隔离数据库及其关闭函数。
+	store, cleanup := newSchedulerTestStore(t)
+	defer cleanup()
+	// ctx 保存测试上下文。
+	ctx := context.Background()
+	// expire 保存测试凭证的未来有效期毫秒值。
+	expire := strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10)
+	// initialValue 保存外部续期请求实际使用的初始凭证。
+	initialValue := "unb=1; _m_h5_tk=old; havana_lgc_exp=" + expire
+	// account 保存测试账号及其初始凭证快照。
+	account := createSchedulerAccount(t, store, "cid-scheduled-conflict", initialValue)
+	// started 控制慢速静默续期请求的开始同步点。
+	started := make(chan struct{})
+	// release 控制慢速静默续期请求继续返回响应。
+	release := make(chan struct{})
+	// srv 保存可注入旧 Set-Cookie 的慢速测试服务。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		http.SetCookie(w, &http.Cookie{Name: "_m_h5_tk", Value: "stale", Path: "/"})
+		_, _ = w.Write([]byte(`{"content":{"data":{"processFinished":true,"resultCode":100}}}`))
+	}))
+	defer srv.Close()
+	// scheduler 保存使用测试 HTTP 服务的定时续期调度器。
+	scheduler := NewScheduler(store, &schedulerFakeStarter{}, nil, nil)
+	scheduler.api = schedulerRenewServiceFromServer(srv)
+	// done 表示慢速定时续期调用已经收束。
+	done := make(chan struct{})
+	go func() {
+		scheduler.apiCookieRenewOne(ctx, "batch-scheduled-conflict", account)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("定时续期请求未开始")
+	}
+	// newerValue 表示外部请求期间另一条流程已经提交的最新凭证。
+	newerValue := "unb=1; _m_h5_tk=newer; havana_lgc_exp=" + expire
+	// updateErr 保存并发新凭证写入错误。
+	updateErr := store.Cookies.UpdateRenewalCookie(ctx, account.ID, newerValue, "", time.Now().Unix())
+	if updateErr != nil {
+		t.Fatalf("保存并发新凭证失败: %v", updateErr)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("定时续期未收束")
+	}
+	// saved、readErr 保存最终凭证快照及其读取错误；旧响应中的同名 Cookie 不得覆盖并发写入的新值。
+	saved, readErr := store.Cookies.GetValue(ctx, account.ID)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(saved, "_m_h5_tk=newer") || strings.Contains(saved, "_m_h5_tk=stale") {
+		t.Fatalf("定时续期旧响应覆盖并发凭证: %q", saved)
 	}
 }
 
@@ -428,8 +478,8 @@ func TestRenewalSchedulerStopZeroValueIsNoop(t *testing.T) {
 	}
 }
 
-// TestPendingAPIRenewRestartFailureIsFinalFailure 封装TestPendingAPIRenewRestartFailureIsFinalFailure业务协调。
-func TestPendingAPIRenewRestartFailureIsFinalFailure(t *testing.T) {
+// TestPendingAPIRenewDoesNotInvokeFailingRestarter 验证迟到响应不能触发潜在失败的重启回调或覆盖超时原因。
+func TestPendingAPIRenewDoesNotInvokeFailingRestarter(t *testing.T) {
 	// store、cleanup 用于本次流程后续判断的store、cleanup
 	store, cleanup := newSchedulerTestStore(t)
 	defer cleanup()
@@ -454,14 +504,14 @@ func TestPendingAPIRenewRestartFailureIsFinalFailure(t *testing.T) {
 		// log 用于本次流程后续判断的log
 		log := lastAPIRenewLog(t, store, account.ID)
 		if log.status != "pending" {
-			if log.status != "failed" || !strings.Contains(log.errorMessage, "restart failed") {
-				t.Fatalf("重启失败终态异常: %+v", log)
+			if log.status != "failed" || !strings.Contains(log.errorMessage, "超时") || starter.restarts.Load() != 0 {
+				t.Fatalf("Promise 超时终态异常: %+v", log)
 			}
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("迟到续期没有写入重启失败终态")
+	t.Fatal("迟到续期没有写入 Promise 超时终态")
 }
 
 // futureSchedulerMillis 封装futureSchedulerMillis业务协调。

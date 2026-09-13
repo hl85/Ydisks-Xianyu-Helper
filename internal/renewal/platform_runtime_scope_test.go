@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,13 +41,14 @@ func TestPendingAPIRenewUsesPlatformRuntimeData(t *testing.T) {
 		HTTPClient: server.Client(), SilentHasLoginURL: server.URL, RetryDelay: -1, PromiseTimeout: 5 * time.Millisecond,
 	}
 	scheduler.apiCookieRenewOne(ctx, "batch-platform-runtime", account)
-	// deadline 是等待异步迟到响应完成的最晚时间。
-	deadline := time.Now().Add(time.Second)
-	for starter.restarts.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
+	scheduler.watchers.Wait()
 	// got 是迟到 Cookie 合并完成后的账号重启次数。
-	if got := starter.restarts.Load(); got != 1 {
-		t.Fatalf("损坏登录密码不应阻断迟到 Cookie 合并和重启，restarts=%d", got)
+	if got := starter.restarts.Load(); got != 0 {
+		t.Fatalf("迟到 Cookie 不应触发重启，restarts=%d", got)
+	}
+	// value、readErr 验证损坏的密码密文没有影响平台 Cookie 的独立合并，不输出明文。
+	value, readErr := store.Cookies.GetValue(ctx, account.ID)
+	if readErr != nil || !strings.Contains(value, "platformLate=saved") {
+		t.Fatalf("损坏登录密码不应阻断迟到 Cookie 合并，err=%v", readErr)
 	}
 }

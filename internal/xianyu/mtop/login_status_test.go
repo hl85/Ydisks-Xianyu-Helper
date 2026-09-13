@@ -151,6 +151,9 @@ func TestClassifyLoginStatusCoversTokenAndFallbackBranches(t *testing.T) {
 	}{
 		{name: "token empty", ret: []string{"TOKEN_EMPTY::令牌为空"}, want: LoginStatusTokenEmpty},
 		{name: "session expired", ret: []string{"FAIL_SYS_SESSION_EXPIRED::Session过期"}, want: LoginStatusSessionExpired},
+		{name: "sid invalid", ret: []string{"SID_INVALID::会话无效"}, want: LoginStatusSessionExpired},
+		{name: "auth reject", ret: []string{"AUTH_REJECT::认证拒绝"}, want: LoginStatusSessionExpired},
+		{name: "need login", ret: []string{"NEED_LOGIN::需要登录"}, want: LoginStatusSessionExpired},
 		{name: "token expired without cookie", ret: []string{"FAIL_SYS_TOKEN_EXPIRED::令牌过期"}, want: LoginStatusFailed},
 		{name: "unknown", ret: []string{"FAIL_UNKNOWN::未知错误"}, want: LoginStatusFailed},
 		{name: "token expired with cookie", ret: []string{"FAIL_SYS_TOKEN_EXPIRED::令牌过期"}, cookieUpdated: true, want: LoginStatusTokenRefreshed},

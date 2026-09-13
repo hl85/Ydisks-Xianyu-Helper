@@ -152,7 +152,7 @@ func (s *Server) writeChatItemError(w http.ResponseWriter, r *http.Request, acco
 	case errors.Is(err, chatapp.ErrOffline):
 		writeErrCode(w, http.StatusConflict, "chat_account_offline", "账号当前离线，无法发送商品", "")
 	case errors.Is(err, chatapp.ErrSendUncertain):
-		writeErrDetails(w, http.StatusBadGateway, "chat_item_card_send_uncertain", "商品卡片发送结果待确认，请先到闲鱼核对，避免重复发送", "", map[string]any{"outgoing_message": outgoing})
+		writeErrDetails(w, http.StatusBadGateway, "chat_item_card_send_uncertain", "商品卡片发送结果待确认，请先到闲鱼核对，避免重复发送", "", map[string]any{"outgoing_message": newChatMessageDTOFromApplication(outgoing)})
 	case errors.Is(err, chatapp.ErrUnavailable), errors.Is(err, chatapp.ErrChatItemUnavailable), errors.Is(err, chatapp.ErrSessionUnavailable):
 		writeErrCode(w, http.StatusServiceUnavailable, "chat_item_service_unavailable", "聊天商品服务未启用", "")
 	case errors.Is(err, chatapp.ErrStatusSave):

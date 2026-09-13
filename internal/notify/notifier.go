@@ -30,6 +30,16 @@ const (
 	EventSecurityVerification = "security_verification"
 	EventTokenRenewal         = "token_renewal"
 	EventDeliveryResult       = "delivery_result"
+	// EventAutomationOrderCreated 表示“拍下改价”自动化任务的终态通知。
+	EventAutomationOrderCreated = "automation_order_created"
+	// EventAutomationOrderPaid 表示“付款发货”自动化任务的终态通知。
+	EventAutomationOrderPaid = "automation_order_paid"
+	// EventAutomationBuyerReviewed 表示“评价赠品”自动化任务的终态通知。
+	EventAutomationBuyerReviewed = "automation_buyer_reviewed"
+	// EventAutomationReviewMissingTimeout 表示“求评价”自动化任务的终态通知。
+	EventAutomationReviewMissingTimeout = "automation_review_missing_timeout"
+	// EventManualDeliveryResult 表示人工发货结果通知；它与四种自动化任务分开筛选。
+	EventManualDeliveryResult = "manual_delivery_result"
 	EventSystemError          = "system_error"
 	// legacyNotifierOperationTimeout 是兼容无 Context 通知与等待入口的最长数据库或网络预算。
 	legacyNotifierOperationTimeout = 10 * time.Second
@@ -140,7 +150,7 @@ func (n *Notifier) NotifyDelivery(accountID, buyerName, buyerID, itemID, message
 	defer notificationCancel()
 	n.NotifyEvent(notificationCtx, NotificationEvent{
 		AccountID: accountID,
-		Type:      EventDeliveryResult,
+		Type:      EventManualDeliveryResult,
 		Level:     "info",
 		Title:     "自动发货通知",
 		Body:      message,
@@ -157,6 +167,17 @@ func (n *Notifier) NotifyDelivery(accountID, buyerName, buyerID, itemID, message
 // runID 与 status 共同构成稳定幂等键：同一次恢复重复报告同一终态时不会重复入队；
 // 状态改变时保留独立通知，便于人工核对后继续执行的运行报告最终结果。
 func (n *Notifier) NotifyAutomationRun(ctx context.Context, runID int64, accountID, buyerID, itemID, status, message, chatID string) {
+	n.notifyAutomationRun(ctx, EventDeliveryResult, runID, accountID, buyerID, itemID, status, message, chatID)
+}
+
+// NotifyAutomationRunForTrigger 将自动化运行终态按具体触发类别持久化到 outbox。
+// triggerType 使用 automation 包的稳定触发编码；未知编码回退到旧交易事件，保证兼容调用方仍能收到通知。
+func (n *Notifier) NotifyAutomationRunForTrigger(ctx context.Context, triggerType string, runID int64, accountID, buyerID, itemID, status, message, chatID string) {
+	n.notifyAutomationRun(ctx, automationEventType(triggerType), runID, accountID, buyerID, itemID, status, message, chatID)
+}
+
+// notifyAutomationRun 统一处理自动化终态通知的输入校验、格式化和幂等入队。
+func (n *Notifier) notifyAutomationRun(ctx context.Context, eventType string, runID int64, accountID, buyerID, itemID, status, message, chatID string) {
 	if n == nil || runID <= 0 || strings.TrimSpace(status) == "" {
 		if n != nil && n.logger != nil {
 			n.logger.Warn("忽略无效的自动化终态通知", "run_id", runID, "account_id", accountID, "status", status)
@@ -167,7 +188,7 @@ func (n *Notifier) NotifyAutomationRun(ctx context.Context, runID int64, account
 	idempotencyKey := fmt.Sprintf("automation-run:%d:%s", runID, strings.TrimSpace(status))
 	n.notifyEvent(ctx, NotificationEvent{
 		AccountID: accountID,
-		Type:      EventDeliveryResult,
+		Type:      eventType,
 		Level:     "info",
 		Title:     "自动化运行通知",
 		Body:      message,
@@ -178,6 +199,22 @@ func (n *Notifier) NotifyAutomationRun(ctx context.Context, runID int64, account
 			"结果":   message,
 		},
 	}, idempotencyKey)
+}
+
+// automationEventType 将自动化触发编码转换为通知筛选编码。
+func automationEventType(triggerType string) string {
+	switch strings.TrimSpace(triggerType) {
+	case "order_created":
+		return EventAutomationOrderCreated
+	case "order_paid":
+		return EventAutomationOrderPaid
+	case "buyer_reviewed":
+		return EventAutomationBuyerReviewed
+	case "review_missing_timeout":
+		return EventAutomationReviewMissingTimeout
+	default:
+		return EventDeliveryResult
+	}
 }
 
 // NotifyAccountAlert 发送账号告警通知（token 失效/自动恢复失败/风控验证等）。
@@ -446,6 +483,16 @@ func eventLabel(eventType string) string {
 		return "续期通知"
 	case EventDeliveryResult:
 		return "交易通知"
+	case EventAutomationOrderCreated:
+		return "拍下改价"
+	case EventAutomationOrderPaid:
+		return "付款发货"
+	case EventAutomationBuyerReviewed:
+		return "评价赠品"
+	case EventAutomationReviewMissingTimeout:
+		return "求评价"
+	case EventManualDeliveryResult:
+		return "手动发货结果"
 	case EventSystemError:
 		return "系统错误"
 	default:
@@ -550,7 +597,24 @@ func eventAllowed(raw, eventType string) (bool, error) {
 	if len(events) == 0 {
 		return true, nil
 	}
-	return events[eventType], nil
+	if events[eventType] {
+		return true, nil
+	}
+	// delivery_result 是旧版统一交易开关；保留它对新四类自动化事件和人工发货结果的兼容放行。
+	if events[EventDeliveryResult] && (isAutomationEventType(eventType) || eventType == EventManualDeliveryResult) {
+		return true, nil
+	}
+	return false, nil
+}
+
+// isAutomationEventType 判断事件是否属于四类可单独控制的自动化任务。
+func isAutomationEventType(eventType string) bool {
+	switch eventType {
+	case EventAutomationOrderCreated, EventAutomationOrderPaid, EventAutomationBuyerReviewed, EventAutomationReviewMissingTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 // parseEventTypes 封装parseEventTypes业务协调。

@@ -49,4 +49,19 @@ func TestParseEventTypesAndEventAllowedBoundaries(t *testing.T) {
 	if deniedErr != nil || denied {
 		t.Fatalf("filtered allow=%v err=%v", denied, deniedErr)
 	}
+	// paidAllowed、paidErr 验证四类自动化事件可按编码单独放行。
+	paidAllowed, paidErr := eventAllowed(`["`+EventAutomationOrderPaid+`"]`, EventAutomationOrderPaid)
+	if paidErr != nil || !paidAllowed {
+		t.Fatalf("automation paid allow=%v err=%v", paidAllowed, paidErr)
+	}
+	// createdAllowed、createdErr 验证关闭另一类自动化事件时不会被付款开关带开。
+	createdAllowed, createdErr := eventAllowed(`["`+EventAutomationOrderPaid+`"]`, EventAutomationOrderCreated)
+	if createdErr != nil || createdAllowed {
+		t.Fatalf("automation created allow=%v err=%v", createdAllowed, createdErr)
+	}
+	// legacyAllowed、legacyErr 验证旧统一交易开关仍能兼容历史渠道配置。
+	legacyAllowed, legacyErr := eventAllowed(`["`+EventDeliveryResult+`"]`, EventAutomationBuyerReviewed)
+	if legacyErr != nil || !legacyAllowed {
+		t.Fatalf("legacy automation allow=%v err=%v", legacyAllowed, legacyErr)
+	}
 }

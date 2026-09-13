@@ -44,13 +44,17 @@ func (c *ClientImpl) FetchUserProfile(ctx context.Context, cookiesStr string) (*
 				return nil, failure
 			}
 		}
-		if updatedCookies != "" && updatedCookies != currentCookies {
+		if updatedCookies != "" {
+			// tokenChanged 表示响应 Cookie 是否真的轮换了签名令牌；普通 Cookie 变化不能跳过主动刷新。
+			tokenChanged := mtopTokenCookieChanged(currentCookies, updatedCookies)
 			currentCookies = updatedCookies
-			if // err 用于本次流程后续判断的err
-			err := sleepCtx(ctx, MTopRetryGap); err != nil {
-				return nil, err
+			if tokenChanged {
+				if // err 用于本次流程后续判断的err
+				err := sleepCtx(ctx, MTopRetryGap); err != nil {
+					return nil, err
+				}
+				continue
 			}
-			continue
 		}
 		if // err 用于本次流程后续判断的err
 		err := sleepCtx(ctx, MTopRetryGap); err != nil {

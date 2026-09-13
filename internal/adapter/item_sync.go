@@ -24,7 +24,7 @@ type ItemSyncRepository struct {
 	logger *slog.Logger
 	// updateRunningCookie 将平台返回的新 Cookie 同步到运行中的账号实例。
 	updateRunningCookie func(context.Context, string, string)
-	// recoverExpiredSession 在平台报告会话过期时触发账号恢复。
+	// recoverExpiredSession 在平台报告 Session 或 MTOP Token 过期时触发账号恢复。
 	recoverExpiredSession func(context.Context, string, error)
 }
 
@@ -336,7 +336,7 @@ func (r *ItemSyncRepository) enrichMultiSpec(ctx context.Context, cookies, cooki
 			// isMultiSpec、detectErr 保存当前商品详情探测结果及错误。
 			isMultiSpec, detectErr := fetcher.DetectItemMultiSpec(probeCtx, cookies, items[index].ID)
 			if detectErr != nil {
-				if mtop.IsSessionExpiredErr(detectErr) {
+				if mtop.IsCredentialRefreshableErr(detectErr) {
 					errorMu.Lock()
 					if sessionErr == nil {
 						sessionErr = detectErr

@@ -19,11 +19,11 @@ AI handles buyer bargaining messages. A maximum discount percentage or amount of
 
 1. Open Notification Settings. Configure system SMTP when using email. Email inherits system SMTP by default; enable Use Independent SMTP when another sender is required and fill in the complete independent configuration.
 2. Create a channel: Bark, DingTalk, Feishu, WeCom, Telegram, email, or custom Webhook. Enter the address or token required by that channel.
-3. Select events. Selecting none means all events. Options include disconnection, recovery, disabling, security verification, renewal, transaction notifications, and system errors.
+3. Select events. Selecting none means all events. The four automation categories—price adjustment after order creation, paid-order delivery, review gifts, and review requests—can now be disabled independently. Other options include disconnection, recovery, disabling, security verification, renewal, manual delivery results, and system errors.
 4. Save and click Test Notification. Confirm delivery in the target channel.
 5. Return to Account Management → Edit and bind the channel to each account. Creating a channel alone does not make an account use it.
 
-A test notification verifies only channel configuration. Automated transaction notices additionally require the account binding and the Transaction Notifications event filter. Automation results send when a task reaches completed, failed, or manual-review status.
+A test notification verifies only channel configuration. Automated transaction notices additionally require the account binding and the corresponding automation event filter. Automation results send when a task reaches completed, failed, or manual-review status. Legacy Transaction Notifications settings remain compatible and receive all automation categories until the channel is edited and saved with granular selections.
 
 Webhook URLs and bot tokens are equivalent to passwords. Do not paste them into screenshots, Issues, or chat. Update and retest a channel immediately after rotating a token.
 

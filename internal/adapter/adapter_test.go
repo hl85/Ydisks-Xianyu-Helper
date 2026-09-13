@@ -599,7 +599,7 @@ func TestOnPasswordLoginRefreshWaitsForPendingFinalResult(t *testing.T) {
 		want       bool
 		wantCookie bool
 	}{
-		{name: "late success", body: `{"content":{"data":{"processFinished":true,"resultCode":100}}}`, want: true, wantCookie: true},
+		{name: "late business success keeps rejected promise", body: `{"content":{"data":{"processFinished":true,"resultCode":100}}}`, want: false, wantCookie: true},
 		{name: "late business failure", body: `{"content":{"data":{"processFinished":true,"resultCode":500}}}`, want: false, wantCookie: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -653,6 +653,9 @@ func TestOnPasswordLoginRefreshConcurrentCallersShareResult(t *testing.T) {
 	var once sync.Once
 	// srv 模拟延迟完成的协议续期端点，暴露并发调用共享结果的时序。
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// 响应头立即兑现 fetch，慢正文只用于维持并发窗口，不能把此成功用例变成 Promise 超时。
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
 		once.Do(func() { close(started) })
 		time.Sleep(60 * time.Millisecond)
 		_, _ = w.Write([]byte(`{"content":{"data":{"processFinished":true,"resultCode":100}}}`))

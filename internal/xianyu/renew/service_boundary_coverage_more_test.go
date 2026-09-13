@@ -39,7 +39,7 @@ func TestRenewServicePureBoundariesCoversModeQueryAndBusinessShapes(t *testing.T
 		t.Fatal(parseErr)
 	}
 	appendOrderedQuery(target, [][2]string{{"space key", "space value"}})
-	if target.RawQuery != "existing=value&space+key=space+value" {
+	if target.RawQuery != "existing=value&space%20key=space%20value" {
 		t.Fatalf("有序查询参数=%q", target.RawQuery)
 	}
 

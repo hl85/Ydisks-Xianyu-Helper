@@ -16,6 +16,11 @@ import (
 
 // FetchItemsPage 获取指定页卖家在售商品列表。
 func (c *ClientImpl) FetchItemsPage(ctx context.Context, cookiesStr string, pageNumber, pageSize int) (*ItemListResult, error) {
+	return c.fetchItemsPage(ctx, cookiesStr, pageNumber, pageSize)
+}
+
+// fetchItemsPage 执行商品列表分页请求；平台成功但缺少 cardList 的响应统一表示当前页没有商品。
+func (c *ClientImpl) fetchItemsPage(ctx context.Context, cookiesStr string, pageNumber, pageSize int) (*ItemListResult, error) {
 	if pageNumber < 1 {
 		pageNumber = 1
 	}
@@ -50,13 +55,17 @@ func (c *ClientImpl) FetchItemsPage(ctx context.Context, cookiesStr string, page
 				return nil, failure
 			}
 		}
-		if updatedCookies != "" && updatedCookies != currentCookies {
+		if updatedCookies != "" {
+			// tokenChanged 表示响应 Cookie 是否真的轮换了签名令牌；普通 Cookie 变化不能跳过主动刷新。
+			tokenChanged := mtopTokenCookieChanged(currentCookies, updatedCookies)
 			currentCookies = updatedCookies
-			if // err 用于本次流程后续判断的err
-			err := sleepCtx(ctx, MTopRetryGap); err != nil {
-				return nil, err
+			if tokenChanged {
+				if // err 用于本次流程后续判断的err
+				err := sleepCtx(ctx, MTopRetryGap); err != nil {
+					return nil, err
+				}
+				continue
 			}
-			continue
 		}
 		if // err 用于本次流程后续判断的err
 		err := sleepCtx(ctx, MTopRetryGap); err != nil {
@@ -72,7 +81,7 @@ func (c *ClientImpl) FetchItemsPage(ctx context.Context, cookiesStr string, page
 	return nil, fmt.Errorf("商品列表接口 token 重试失败: %w", c.mtopResponseFailure("商品列表接口", http.StatusOK, lastRet, "重试次数已耗尽"))
 }
 
-// fetchItemsPageOnce 封装fetch商品列表页码Once业务协调。
+// fetchItemsPageOnce 执行一次商品列表请求并校验响应；SUCCESS 且缺少 cardList 的平台约定表示空商品页。
 func (c *ClientImpl) fetchItemsPageOnce(ctx context.Context, cookiesStr string, pageNumber, pageSize int) (*ItemListResult, []string, string, error) {
 	// hc 用于本次流程后续判断的hc
 	hc := c.httpClient()
@@ -145,10 +154,16 @@ func (c *ClientImpl) fetchItemsPageOnce(ctx context.Context, cookiesStr string, 
 		return nil, decoded.Ret, updated, nil
 	}
 
-	// cards、cardsOK 验证平台确实返回商品列表；缺失或畸形响应不能伪装成完整空列表。
+	// cards、cardsOK 保存平台返回的商品卡片及其数组类型；成功响应缺少该字段是账号无商品的正式协议形态。
 	cards, cardsOK := decoded.Data["cardList"].([]any)
+	// cardListPresent 区分平台省略字段与显式返回 null、对象等畸形类型，只有前者可归一为空页。
+	_, cardListPresent := decoded.Data["cardList"]
+	if !cardListPresent {
+		cards = []any{}
+		cardsOK = true
+	}
 	if !cardsOK {
-		return nil, decoded.Ret, updated, fmt.Errorf("商品列表缺少有效 cardList，未执行同步")
+		return nil, decoded.Ret, updated, fmt.Errorf("商品列表 cardList 类型无效或与平台总数不一致，未执行同步")
 	}
 	// items 用于本次流程后续判断的商品列表
 	items := parseItemList(decoded.Data)
@@ -157,13 +172,19 @@ func (c *ClientImpl) fetchItemsPageOnce(ctx context.Context, cookiesStr string, 
 	}
 	// totalCount、totalPages 用于本次流程后续判断的总数Count、totalPages
 	totalCount, totalPages := itemListPagination(decoded.Data, pageNumber, pageSize)
+	// reportedTotal 保留显式数组的完整性依据；成功省略数组时以空列表协议为准。
+	reportedTotal := itemListReportedTotal(decoded.Data)
+	if !cardListPresent {
+		// 成功省略列表已经确认空页；不能再由 pageCount 推算出虚构商品数量或触发继续翻页。
+		totalCount, totalPages, reportedTotal = 0, pageNumber, 0
+	}
 	return &ItemListResult{
 		Items:              items,
 		PageNumber:         pageNumber,
 		PageSize:           pageSize,
 		CurrentCount:       len(cards),
 		TotalCount:         totalCount,
-		ReportedTotalCount: itemListReportedTotal(decoded.Data),
+		ReportedTotalCount: reportedTotal,
 		TotalPages:         totalPages,
 		SavedCountHint:     len(items),
 		UpdatedCookies:     updated,
@@ -172,6 +193,11 @@ func (c *ClientImpl) fetchItemsPageOnce(ctx context.Context, cookiesStr string, 
 
 // FetchAllItems 自动分页获取卖家全部在售商品。maxPages <= 0 表示不限页。
 func (c *ClientImpl) FetchAllItems(ctx context.Context, cookiesStr string, pageSize, maxPages int) (*ItemListResult, error) {
+	return c.fetchAllItems(ctx, cookiesStr, pageSize, maxPages)
+}
+
+// fetchAllItems 执行商品全集查询；所有调用方对平台空商品页使用同一缺失 cardList 归一规则。
+func (c *ClientImpl) fetchAllItems(ctx context.Context, cookiesStr string, pageSize, maxPages int) (*ItemListResult, error) {
 	if pageSize <= 0 {
 		pageSize = 20
 	}
@@ -193,7 +219,7 @@ func (c *ClientImpl) FetchAllItems(ctx context.Context, cookiesStr string, pageS
 	fetchedCount, expectedCount := 0, 0
 	for maxPages <= 0 || page <= maxPages {
 		// res、err 用于本次流程后续判断的res、err
-		res, err := c.FetchItemsPage(ctx, currentCookies, page, pageSize)
+		res, err := c.fetchItemsPage(ctx, currentCookies, page, pageSize)
 		if err != nil {
 			return nil, err
 		}

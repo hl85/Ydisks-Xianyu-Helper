@@ -175,10 +175,14 @@ func TestMigrate_ExistingAutomationRunsReceiveEmptyDeliveryProof(t *testing.T) {
 	if varProof != "" {
 		t.Fatalf("历史运行凭证应为空: %q", varProof)
 	}
-	// finalVersion、versionErr 验证升级包含聊天删除截止线、认证代次、会话角色与凭证冷却迁移，不能仅证明旧 delivery_proof 列存在。
+	// finalVersion、versionErr 验证升级包含聊天删除截止线、认证代次、会话角色、凭证冷却与账号任务重试迁移，不能仅证明旧 delivery_proof 列存在。
 	finalVersion, versionErr := goose.GetDBVersion(rawDB)
-	if versionErr != nil || finalVersion != 48 {
+	if versionErr != nil || finalVersion != 49 {
 		t.Fatalf("final migration version=%d err=%v", finalVersion, versionErr)
+	}
+	// credential_cooldowns 表由 00048 创建，账号任务重试计数列由 00049 创建，两者都必须在最终版本中存在。
+	if !tableExists(t, rawDB, "credential_cooldowns") {
+		t.Fatal("升级后必须创建凭证冷却持久化表")
 	}
 	if !tableExists(t, rawDB, "order_ownership_repairs") {
 		t.Fatal("升级后必须创建订单归属修正审计表")
@@ -190,7 +194,7 @@ func TestMigrate_ExistingAutomationRunsReceiveEmptyDeliveryProof(t *testing.T) {
 }
 
 // TestMigrate_UpgradesDatabaseWithMainChatVersions 验证已发布 main 的 00029/00030
-// 聊天迁移可以原样升级到同时包含归属修正审计、历史规则清理和会话删除语义的 00044 最终版本。
+// 聊天迁移可以原样升级到同时包含归属修正审计、会话删除语义和账号任务重试上限的 00048 最终版本。
 func TestMigrate_UpgradesDatabaseWithMainChatVersions(t *testing.T) {
 	// tmpDir 保存隔离的已发布 main 数据库目录，测试结束后由 testing 清理。
 	tmpDir := t.TempDir()
@@ -260,13 +264,16 @@ func TestMigrate_UpgradesDatabaseWithMainChatVersions(t *testing.T) {
 	if !columnExists(t, rawDB, "automation_rule_actions", "delivery_template_id") {
 		t.Fatal("automation_rule_actions should reference delivery templates")
 	}
-	// finalVersion、versionErr 验证迁移账本已推进到凭证冷却持久化的 00048，或记录读取失败。
+	// finalVersion、versionErr 验证迁移账本已推进到凭证冷却持久化（00048）与账号任务重试上限语义（00049），或记录读取失败。
 	finalVersion, versionErr := goose.GetDBVersion(rawDB)
 	if versionErr != nil {
 		t.Fatalf("read final migration version: %v", versionErr)
 	}
-	if finalVersion != 48 {
-		t.Fatalf("final migration version=%d, want 48", finalVersion)
+	if finalVersion != 49 {
+		t.Fatalf("final migration version=%d, want 49", finalVersion)
+	}
+	if !columnExists(t, rawDB, "account_task_runs", "attempt_count") {
+		t.Fatal("account_task_runs should include the retry attempt counter")
 	}
 	if !tableExists(t, rawDB, "order_ownership_repairs") {
 		t.Fatal("已发布 main 数据库升级后必须创建订单归属修正审计表")

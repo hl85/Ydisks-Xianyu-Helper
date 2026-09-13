@@ -48,7 +48,31 @@ export type NotificationEventType =
   | 'security_verification'
   | 'token_renewal'
   | 'delivery_result'
+  | 'automation_order_created'
+  | 'automation_order_paid'
+  | 'automation_buyer_reviewed'
+  | 'automation_review_missing_timeout'
+  | 'manual_delivery_result'
   | 'system_error';
+
+/** automationNotificationEventTypes 是四类自动化任务使用的独立通知开关编码。 */
+export const automationNotificationEventTypes: NotificationEventType[] = [
+  'automation_order_created',
+  'automation_order_paid',
+  'automation_buyer_reviewed',
+  'automation_review_missing_timeout',
+];
+
+/** normalizeNotificationEventTypes 把旧版统一交易开关展开为可编辑的细分类别。 */
+export const normalizeNotificationEventTypes = (events: NotificationEventType[]): NotificationEventType[] => {
+  if (!events.includes('delivery_result')) return events;
+  // normalizedEvents 保存展开旧版统一开关后的去重事件集合，保留人工发货通知的历史接收语义。
+  const normalizedEvents = events.filter(
+    // event 是当前事件集合中的编码；旧版统一交易编码需要替换成细分集合。
+    event => event !== 'delivery_result',
+  );
+  return Array.from(new Set([...normalizedEvents, ...automationNotificationEventTypes, 'manual_delivery_result']));
+};
 
 /** 由当前 feature adapter 归一后的 NotificationChannel UI 模型；不直接暴露 HTTP DTO。 */
 export interface NotificationChannel {

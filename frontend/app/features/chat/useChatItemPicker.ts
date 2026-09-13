@@ -1,5 +1,5 @@
 import { useCallback,useEffect,useRef,useState } from 'react';
-import { confirmedOutgoingMessageFromError,getChatItems,sendChatItemCard } from './api';
+import { confirmedOutgoingMessageFromError,getChatItems,sendChatItemCard,uncertainOutgoingMessageFromError } from './api';
 import type { ChatItem,ChatMessage } from './models';
 import { isChatAbortError,isCurrentChatRequest } from './state';
 
@@ -133,11 +133,8 @@ export const useChatItemPicker = (options: UseChatItemPickerOptions): UseChatIte
   }, [accountID, appliedQuery, chatID, open, reloadKey, role]);
 
 	useEffect(/* 当前副作用在关闭、会话切换或卸载时取消未完成发送，防止旧会话回写。 */ () => {
-		if (!open) {
-			sendController.current?.abort();
-			++sendSequence.current;
-			setSendingItemID('');
-		}
+		// 当前上下文开始时清理上一个会话的发送占用；旧响应由 cleanup 的代次推进隔离。
+		setSendingItemID('');
 		return /* cleanup 取消失去弹窗上下文所有权的发送请求，并使忽略 AbortSignal 的旧 Promise 失效。 */ () => {
 			sendController.current?.abort();
 			++sendSequence.current;
@@ -219,6 +216,13 @@ export const useChatItemPicker = (options: UseChatItemPickerOptions): UseChatIte
         onSent(confirmed, '商品卡片已发送，但本地状态同步失败，请刷新会话确认状态。');
         onClose();
       } else if (!isChatAbortError(sendError)) {
+        // uncertain 保存未知结果消息，必须展示核对提示并结束本次发送，不能开放普通重试。
+        const uncertain = uncertainOutgoingMessageFromError(sendError);
+        if (uncertain && uncertain.account_id === accountID && uncertain.chat_id === chatID) {
+          onSent(uncertain, '商品卡片发送结果待确认，请先到闲鱼核对，避免重复发送。');
+          onClose();
+          return;
+        }
         setError(sendError instanceof Error ? sendError.message : '商品卡片发送失败');
       }
     } finally {

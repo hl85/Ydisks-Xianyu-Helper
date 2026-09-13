@@ -49,6 +49,15 @@ const messageFixture = { id: 1, account_id: 'account-1', chat_id: 'chat-1', mess
 // sentMessageFixture 是文字发送成功后返回的消息。
 const sentMessageFixture = { ...messageFixture, id: 2, message_key: 'message-2', direction: 'outgoing', content: '回复内容' } as ChatMessage;
 
+/** deferredChatReview 让测试精确控制 Promise 完成顺序，验证忽略取消信号的迟到响应。 */
+const deferredChatReview = <T,>(): { /** promise 是待完成请求。 */ promise: Promise<T>; /** resolve 使用 value 完成请求。 */ resolve: (value: T) => void } => {
+  // resolve 保存由测试拥有的完成回调。
+  let resolve!: (value: T) => void;
+  // promise 由测试显式完成，不使用真实网络或计时等待。
+  const promise = new Promise<T>(/* complete 是 Promise 的完成函数。 */ complete => { resolve = complete; });
+  return { promise, resolve };
+};
+
 describe('useChat', /* 当前回调处理聊天加载、分页、发送和实时连接状态。 */ () => {
   beforeEach(/* 当前回调重置聊天 API 替身和全局实时连接状态。 */ () => {
     vi.clearAllMocks();
@@ -688,7 +697,7 @@ describe('useChat', /* 当前回调处理聊天加载、分页、发送和实时
 			hook.unmount();
 		});
 
-		test('删除失败保留会话并提供独立可清除错误', /* 当前回调验证确认框可在失败后保留并重试。 */ async () => {
+	test('删除失败保留会话并提供独立可清除错误', /* 当前回调验证确认框可在失败后保留并重试。 */ async () => {
 		deleteSessionMock.mockRejectedValueOnce(new Error('数据库暂时不可用'));
 		// hook 是会话删除失败场景的聊天 Hook。
 		const hook = renderHook(
@@ -710,6 +719,61 @@ describe('useChat', /* 当前回调处理聊天加载、分页、发送和实时
 			() => hook.result.current.clearDeleteError(),
 		);
 		expect(hook.result.current.deleteError).toBe('');
+		hook.unmount();
+	});
+
+	test('删除会话取消联系人分页后能够再次加载', /* 当前回调验证删除不会遗留联系人分页忙碌状态或阻断后续请求。 */ async () => {
+		// pendingPage 表示第一次联系人分页是否仍在等待，用于制造删除期间的迟到响应。
+		let pendingPage = true;
+		// contactSignal 保存被删除流程取消的联系人分页信号。
+		let contactSignal: AbortSignal | undefined;
+		// releasePendingPage 保存迟到分页的可控完成函数，验证其完成不会改写新状态。
+		let releasePendingPage: (() => void) | undefined;
+		getSessionPageMock.mockImplementation(/* accountID、cursor、options、refresh 分别表示请求归属、游标、取消信号和是否刷新平台。 */ async (_accountID, _cursor, options, _refresh) => {
+			if (pendingPage && getSessionPageMock.mock.calls.length >= 3) {
+				pendingPage = false;
+				contactSignal = options?.signal;
+				return new Promise(/* resolve 保存迟到联系人页的完成入口。 */ resolve => {
+					releasePendingPage = /* 当前回调释放被取消的联系人页响应。 */ () => resolve({ sessions: [], has_more: false });
+				});
+			}
+			return { sessions: [sessionFixture], has_more: true, next_cursor: 2 };
+		});
+		// hook 是联系人分页与删除交错场景的聊天 Hook。
+		const hook = renderHook(
+			// pendingContactsHookFactory 创建联系人请求可控的 Hook。
+			() => useChat(),
+		);
+		await waitFor(
+			// activeChatAssertion 等待默认会话完成选择。
+			() => expect(hook.result.current.activeChatID).toBe('chat-1'),
+		);
+		await act(
+			// startContactPageAction 启动一个保持未完成的联系人分页。
+			() => { void hook.result.current.loadMoreContacts(); },
+		);
+		await waitFor(
+			// contactLoadingAssertion 等待联系人分页建立取消边界。
+			() => {
+				expect(contactSignal).toBeDefined();
+				expect(hook.result.current.contactsLoading).toBe(true);
+			},
+		);
+		await act(
+			// deleteAction 删除会话并取消正在进行的联系人分页。
+			async () => { expect(await hook.result.current.deleteConversation('account-1', 'chat-1')).toBe(true); },
+		);
+		expect(contactSignal?.aborted).toBe(true);
+		expect(hook.result.current.contactsLoading).toBe(false);
+		await act(
+			// lateContactPageAction 释放旧响应，确认不会重新占用分页状态。
+			async () => { releasePendingPage?.(); },
+		);
+		await act(
+			// reloadContactPageAction 验证删除完成后新的联系人分页仍可启动。
+			async () => { await hook.result.current.loadMoreContacts(); },
+		);
+		expect(hook.result.current.contactsLoading).toBe(false);
 		hook.unmount();
 	});
 
@@ -771,4 +835,89 @@ describe('useChat', /* 当前回调处理聊天加载、分页、发送和实时
 		expect(hook.result.current.deleteError).toBe('');
 		hook.unmount();
 	});
+
+  test('删除后本地首页还有数据时可以继续分页', /* 当前回调覆盖全部加载后删除导致分页重新开始的完整路径。 */ async () => {
+    getSessionPageMock.mockResolvedValue({ sessions: [sessionFixture], has_more: false, platform_has_more: false, stored_has_more: false });
+    // hook 保存测试页面，初始联系人分页已经耗尽。
+    const hook = renderHook(/* 当前回调构造隔离聊天状态。 */ () => useChat());
+    await waitFor(/* 当前回调等待初始会话选择。 */ () => expect(hook.result.current.activeChatID).toBe('chat-1'));
+    await waitFor(/* 当前回调等待启动时平台首页读取完成。 */ () => expect(getSessionPageMock.mock.calls.some(/* call 表示一个历史会话查询。 */ call => call[3] === true)).toBe(true));
+    // remaining 表示删除后本地首页，后面仍有联系人。
+    const remaining = { ...sessionFixture, chat_id: 'chat-2' };
+    getSessionPageMock.mockResolvedValue({ sessions: [remaining], has_more: true, platform_has_more: false, stored_has_more: true, next_stored_cursor: 'next' });
+    await act(/* 当前回调执行删除和本地首页恢复。 */ async () => { expect(await hook.result.current.deleteConversation('account-1', 'chat-1')).toBe(true); });
+    expect(hook.result.current.hasMoreContacts).toBe(true);
+    // before 保存点击前的查询次数。
+    const before = getSessionPageMock.mock.calls.length;
+    await act(/* 当前回调请求删除后的下一本地页。 */ async () => { await hook.result.current.loadMoreContacts(); });
+    expect(getSessionPageMock.mock.calls.length).toBe(before + 1);
+    expect(getSessionPageMock).toHaveBeenLastCalledWith('account-1', undefined, expect.anything(), false, 'next');
+    hook.unmount();
+  });
+
+  test('刷新首页阻断在途分页且迟到分页不能污染新首页', /* 当前回调验证替换列表与追加列表共用失效边界。 */ async () => {
+    // hook 保存已完成启动加载的聊天页面。
+    const hook = renderHook(/* 当前回调创建待测 Hook。 */ () => useChat());
+    await waitFor(/* 当前回调等待首页准备完成。 */ () => expect(hook.result.current.activeChatID).toBe('chat-1'));
+    await act(/* 当前回调明确等待完整首页刷新结束。 */ async () => { await hook.result.current.reloadSessions('account-1'); });
+    // pagePending、homePending 分别控制旧分页和新首页的响应时机。
+    const pagePending = deferredChatReview<Awaited<ReturnType<typeof getChatSessionPage>>>();
+    // homePending 控制新首页返回时机，必须晚于旧分页启动。
+    const homePending = deferredChatReview<Awaited<ReturnType<typeof getChatSessionPage>>>();
+    getSessionPageMock.mockImplementationOnce(/* 当前回调保留旧分页未完成。 */ () => pagePending.promise);
+    // pageRequest 保存旧分页调用的完成结果。
+    let pageRequest: Promise<void> | undefined;
+    await act(/* 当前回调启动旧分页。 */ () => { pageRequest = hook.result.current.loadMoreContacts(); });
+    getSessionPageMock.mockImplementationOnce(/* 当前回调保留新首页未完成。 */ () => homePending.promise);
+    // homeRequest 保存新首页调用的完成结果。
+    let homeRequest: Promise<ChatSession[]> | undefined;
+    await act(/* 当前回调启动首页替换，旧分页此时必须失效。 */ () => { homeRequest = hook.result.current.reloadSessions('account-1'); });
+    // before 保存首页在途时的请求数，加载更多不得抢用旧游标。
+    const before = getSessionPageMock.mock.calls.length;
+    await act(/* 当前回调尝试在首页加载中追加分页。 */ async () => { await hook.result.current.loadMoreContacts(); });
+    expect(getSessionPageMock.mock.calls.length).toBe(before);
+    await act(/* 当前回调完成新首页。 */ async () => { homePending.resolve({ sessions: [sessionFixture], has_more: false }); await homeRequest; });
+    await act(/* 当前回调模拟不理会 AbortSignal 的旧分页迟到。 */ async () => { pagePending.resolve({ sessions: [{ ...sessionFixture, chat_id: 'stale-chat' }], has_more: true }); await pageRequest; });
+    expect(hook.result.current.activeSessions.map(/* session 表示最终可见联系人。 */ session => session.chat_id)).toEqual(['chat-1']);
+    expect(hook.result.current.hasMoreContacts).toBe(false);
+    expect(hook.result.current.contactsLoading).toBe(false);
+    hook.unmount();
+  });
+
+  test.each([false, true])('旧删除恢复晚到不能解除新账号删除隔离，旧请求失败=%s', /* failed 控制旧删除走成功或错误恢复路径。 */ async failed => {
+    // secondAccount、secondSession 分别表示切换目标账号与其待删除会话。
+    const secondAccount = { ...accountFixture, id: 'account-2' };
+    // secondSession 是第二账号独立的删除目标。
+    const secondSession = { ...sessionFixture, account_id: 'account-2', chat_id: 'chat-2' };
+    getDetailsMock.mockResolvedValue([accountFixture, secondAccount]);
+    getSessionPageMock.mockImplementation(/* accountID 指定本次查询账号，默认返回其当前会话。 */ async accountID => ({ sessions: [accountID === 'account-1' ? sessionFixture : secondSession], has_more: false }));
+    // hook 保存可以跨账号切换的聊天页面。
+    const hook = renderHook(/* 当前回调构造双账号 Hook。 */ () => useChat());
+    await waitFor(/* 当前回调等待第一账号初始化。 */ () => expect(hook.result.current.activeChatID).toBe('chat-1'));
+    await act(/* 当前回调等待第一账号平台刷新完成。 */ async () => { await hook.result.current.reloadSessions('account-1'); });
+    // oldHome 保存旧删除后的本地恢复请求，可在新账号删除开始后迟到。
+    const oldHome = deferredChatReview<Awaited<ReturnType<typeof getChatSessionPage>>>();
+    getSessionPageMock.mockImplementationOnce(/* 当前回调阻塞旧删除后的本地首页。 */ () => oldHome.promise);
+    if (failed) deleteSessionMock.mockRejectedValueOnce(new Error('删除失败'));
+    // oldDelete 保存旧删除的最终结果。
+    let oldDelete: Promise<boolean> | undefined;
+    await act(/* 当前回调启动旧账号删除并等待到本地恢复阶段。 */ () => { oldDelete = hook.result.current.deleteConversation('account-1', 'chat-1'); });
+    await act(/* 当前回调切换账号，取消旧删除上下文。 */ () => { hook.result.current.setActiveAccountID('account-2'); });
+    await waitFor(/* 当前回调等待第二账号会话选择。 */ () => expect(hook.result.current.activeChatID).toBe('chat-2'));
+    // newDeletePending 阻塞第二账号删除以验证保护标记仍有效。
+    const newDeletePending = deferredChatReview<{ /** success 表示服务端删除已完成。 */ success: boolean }>();
+    deleteSessionMock.mockImplementationOnce(/* 当前回调保留新删除未完成。 */ () => newDeletePending.promise);
+    // newDelete 保存新删除的完成结果。
+    let newDelete: Promise<boolean> | undefined;
+    await act(/* 当前回调启动第二账号删除。 */ () => { newDelete = hook.result.current.deleteConversation('account-2', 'chat-2'); });
+    await act(/* 当前回调释放第一账号的旧本地恢复结果。 */ async () => { oldHome.resolve({ sessions: [], has_more: false }); expect(await oldDelete).toBe(false); });
+    // before 保存旧请求收口后查询次数；目标实时事件必须仍被新删除隔离。
+    const before = getSessionPageMock.mock.calls.length;
+    await act(/* 当前回调发布新删除目标消息。 */ () => { publishChatLiveMessage({ ...messageFixture, account_id: 'account-2', chat_id: 'chat-2', content: '不应显示' }); });
+    expect(getSessionPageMock.mock.calls.length).toBe(before);
+    expect(hook.result.current.messages.some(/* message 表示当前会话可见消息。 */ message => message.content === '不应显示')).toBe(false);
+    expect(hook.result.current.deletingChatID).toBe('chat-2');
+    await act(/* 当前回调完成新删除并释放所有 Promise。 */ async () => { newDeletePending.resolve({ success: true }); await newDelete; });
+    hook.unmount();
+  });
 });

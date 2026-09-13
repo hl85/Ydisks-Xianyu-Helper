@@ -287,10 +287,12 @@ func (c *Cookies) UpdateValueExisting(ctx context.Context, cookieID, cookieValue
 		return err
 	}
 	defer tx.Rollback()
-	// rawMetadata 用于本次流程后续判断的原始Metadata
+	// rawMetadata、previousRevision 保存锁内读取的 Cookie metadata 和最近修订号。
 	var rawMetadata string
+	// previousRevision 保存数据库中最近一次 Cookie 写回的单调修订号。
+	var previousRevision int64
 	if // err 用于本次流程后续判断的err
-	err := tx.QueryRowContext(ctx, c.cookieSelectForUpdate(`COALESCE(metadata_json,'')`), cookieID).Scan(&rawMetadata); err != nil {
+	err := tx.QueryRowContext(ctx, c.cookieSelectForUpdate(`COALESCE(metadata_json,''),COALESCE(last_refresh_at,0)`), cookieID).Scan(&rawMetadata, &previousRevision); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -301,9 +303,14 @@ func (c *Cookies) UpdateValueExisting(ctx context.Context, cookieID, cookieValue
 	if err != nil {
 		return err
 	}
+	// revision 保持修订号单调递增；秒级时间戳足够供应用层版本冲突检查且兼容既有字段语义。
+	revision := time.Now().UTC().Unix()
+	if revision <= previousRevision {
+		revision = previousRevision + 1
+	}
 	// res、err 用于本次流程后续判断的res、err
 	res, err := tx.ExecContext(ctx,
-		`UPDATE cookies SET value=?,metadata_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, encrypted, metadata, cookieID)
+		`UPDATE cookies SET value=?,metadata_json=?,last_refresh_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, encrypted, metadata, revision, cookieID)
 	if err != nil {
 		return err
 	}

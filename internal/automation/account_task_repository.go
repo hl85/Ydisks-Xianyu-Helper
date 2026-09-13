@@ -34,10 +34,24 @@ type AccountTaskRepository interface {
 	MarkPolished(ctx context.Context, cookieID, date string, at int64) error
 }
 
+// accountTaskCredentialLocker 表示账号任务写回凭证时可使用的短临界区锁。
+// 锁只保护本地读取与持久化，不得覆盖外部平台调用。
+type accountTaskCredentialLocker interface {
+	LockAccountCredentials(accountID string) func()
+}
+
 // storeAccountTaskRepository 将完整 Store 适配为账号任务窄 repository。
 type storeAccountTaskRepository struct {
 	// store 保存数据库聚合入口，仅在适配器内部使用。
 	store *db.Store
+}
+
+// LockAccountCredentials 委托账号凭证临界区锁，供任务合并最新 Cookie 快照时避免覆盖并发续期。
+func (r storeAccountTaskRepository) LockAccountCredentials(accountID string) func() {
+	if r.store == nil {
+		return func() {}
+	}
+	return r.store.LockAccountCredentials(accountID)
 }
 
 // storeAccountTaskRepositoryCompileCheck 确保 Store 适配器完整实现账号任务窄接口。
@@ -66,6 +80,11 @@ func (r storeAccountTaskRepository) GetValue(ctx context.Context, cookieID strin
 // UpdateValueExisting 委托账号 Cookie 更新。
 func (r storeAccountTaskRepository) UpdateValueExisting(ctx context.Context, cookieID, cookieValue string) error {
 	return r.store.Cookies.UpdateValueExisting(ctx, cookieID, cookieValue)
+}
+
+// UpdateRenewalCookie 委托保存带完整 metadata 的账号 Cookie。
+func (r storeAccountTaskRepository) UpdateRenewalCookie(ctx context.Context, cookieID, cookieValue, metadataJSON string, lastRefreshAt int64) error {
+	return r.store.Cookies.UpdateRenewalCookie(ctx, cookieID, cookieValue, metadataJSON, lastRefreshAt)
 }
 
 // Get 委托账号任务设置查询。

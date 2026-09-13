@@ -77,6 +77,7 @@ func TestChatItemHandlersMapUnifiedErrors(t *testing.T) {
 		{name: "invalid send json", method: http.MethodPost, path: "/api/v1/chat/item-cards", body: "{", port: &chatItemHandlerPort{}, wantStatus: http.StatusBadRequest, wantCode: "chat_item_invalid"},
 		{name: "offline send", method: http.MethodPost, path: "/api/v1/chat/item-cards", body: validItemBody, port: &chatItemHandlerPort{sendErr: chatapp.ErrOffline}, wantStatus: http.StatusConflict, wantCode: "chat_account_offline"},
 		{name: "sender unavailable", method: http.MethodPost, path: "/api/v1/chat/item-cards", body: validItemBody, port: &chatItemHandlerPort{sendingUnavailable: true}, wantStatus: http.StatusServiceUnavailable, wantCode: "chat_item_sending_unavailable"},
+		{name: "uncertain send", method: http.MethodPost, path: "/api/v1/chat/item-cards", body: validItemBody, port: &chatItemHandlerPort{sendErr: chatapp.ErrSendUncertain, outgoing: failedMessage}, wantStatus: http.StatusBadGateway, wantCode: "chat_item_card_send_uncertain"},
 		{name: "platform send failed", method: http.MethodPost, path: "/api/v1/chat/item-cards", body: validItemBody, port: &chatItemHandlerPort{sendErr: chatapp.ErrSend, outgoing: failedMessage}, wantStatus: http.StatusBadGateway, wantCode: "chat_item_card_send_failed"},
 		{name: "unexpected send failed", method: http.MethodPost, path: "/api/v1/chat/item-cards", body: validItemBody, port: &chatItemHandlerPort{sendErr: errors.New("unexpected send error")}, wantStatus: http.StatusBadGateway, wantCode: "chat_item_card_send_failed"},
 		{name: "pending save failed", method: http.MethodPost, path: "/api/v1/chat/item-cards", body: validItemBody, port: &chatItemHandlerPort{sendErr: chatapp.ErrChatItemCreate}, wantStatus: http.StatusInternalServerError, wantCode: "chat_item_message_save_failed"},
@@ -110,6 +111,9 @@ func TestChatItemHandlersMapUnifiedErrors(t *testing.T) {
 			}
 			if testCase.port.outgoing != nil && payload.Details["outgoing_message"] == nil {
 				t.Fatalf("平台发送失败缺少 outgoing_message: %s", recorder.Body.String())
+			}
+			if testCase.port.outgoing != nil {
+				assertOutgoingErrorDTO(t, recorder, "acc1", "chat")
 			}
 			assertOpenAPIResponse(t, request, recorder)
 		})

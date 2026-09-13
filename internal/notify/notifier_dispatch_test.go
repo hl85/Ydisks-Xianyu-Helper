@@ -467,6 +467,50 @@ func TestNotifyAutomationRunQueuesEachTerminalStateOnce(t *testing.T) {
 	}
 }
 
+// TestNotifyAutomationRunForTriggerFiltersByAutomationCategory 验证自动化四类结果使用独立事件筛选并分别入队。
+func TestNotifyAutomationRunForTriggerFiltersByAutomationCategory(t *testing.T) {
+	// store、cleanup 保存本测试的 SQLite 通知存储与关闭责任。
+	store, cleanup := newNotifyStoreBare(t)
+	defer cleanup()
+	// paidChannelID、reviewChannelID 保存分别订阅付款发货和评价赠品的渠道。
+	paidChannelID := addWebhookChannel(t, store, "cid", "付款渠道", "http://127.0.0.1:1")
+	// reviewChannelID 保存只订阅评价赠品的渠道主键，用于验证另一类自动化不会误入队。
+	reviewChannelID := addWebhookChannel(t, store, "cid", "评价渠道", "http://127.0.0.1:1")
+	// updateErr 保存为两个渠道写入独立自动化事件订阅时的数据库错误。
+	if _, updateErr := store.DB.ExecContext(context.Background(), `UPDATE notification_channels SET event_types=? WHERE id=?`, `["`+EventAutomationOrderPaid+`"]`, paidChannelID); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	// updateErr 保存评价赠品渠道订阅配置的数据库更新错误。
+	if _, updateErr := store.DB.ExecContext(context.Background(), `UPDATE notification_channels SET event_types=? WHERE id=?`, `["`+EventAutomationBuyerReviewed+`"]`, reviewChannelID); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	// notifier 保存未启动 worker 的真实通知器；带稳定幂等键的自动化结果必须写入 outbox。
+	notifier := New("cid", store, nil)
+	notifier.NotifyAutomationRunForTrigger(context.Background(), "order_paid", 91, "cid", "buyer", "item", "success", "付款发货成功", "chat")
+	// counts 保存两个订阅渠道实际入队的消息数。
+	var paidCount, reviewCount int
+	if // countErr 保存读取付款渠道 outbox 数量时的数据库错误。
+	countErr := store.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notification_outbox WHERE channel_id=?`, paidChannelID).Scan(&paidCount); countErr != nil {
+		t.Fatal(countErr)
+	}
+	if // countErr 保存读取评价渠道 outbox 数量时的数据库错误。
+	countErr := store.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM notification_outbox WHERE channel_id=?`, reviewChannelID).Scan(&reviewCount); countErr != nil {
+		t.Fatal(countErr)
+	}
+	if paidCount != 1 || reviewCount != 0 {
+		t.Fatalf("automation category counts paid=%d review=%d", paidCount, reviewCount)
+	}
+	// eventType 保存 outbox 中实际持久化的细分类别，防止后续 worker 丢失筛选依据。
+	var eventType string
+	if // scanErr 保存读取付款渠道 outbox 事件类型时的数据库错误。
+	scanErr := store.DB.QueryRowContext(context.Background(), `SELECT event_type FROM notification_outbox WHERE channel_id=?`, paidChannelID).Scan(&eventType); scanErr != nil {
+		t.Fatal(scanErr)
+	}
+	if eventType != EventAutomationOrderPaid {
+		t.Fatalf("event type=%q want %q", eventType, EventAutomationOrderPaid)
+	}
+}
+
 // TestParseConfig_InvalidJSON 非法 JSON 走旧格式兼容分支。
 func TestParseConfig_InvalidJSON(t *testing.T) {
 	// m 用于本次流程后续判断的m

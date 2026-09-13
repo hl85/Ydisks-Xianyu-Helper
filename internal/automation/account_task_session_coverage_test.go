@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
+
+	"xianyu-go/internal/xianyu/cookierefresh"
+	"xianyu-go/internal/xianyu/mtop"
 )
 
 // TestAccountTaskSessionAndCookiePersistence 验证账号任务会话阻断指纹和响应 Cookie 收口分支。
@@ -27,6 +31,42 @@ func TestAccountTaskSessionAndCookiePersistence(t *testing.T) {
 	updatedValue, updatedErr := coordinator.persistTaskCookies(ctx, "cid", "sid=old", " sid=new ")
 	if updatedErr != nil || updatedValue != "sid=new" || len(sender.cookieUpdates) != 1 || sender.cookieUpdates[0] != "sid=new" {
 		t.Fatalf("updated value=%q err=%v updates=%v", updatedValue, updatedErr, sender.cookieUpdates)
+	}
+	// initialCookie、initialSnapshot 是带完整作用域的账号凭证初始状态。
+	initialCookie := "unb=1; _m_h5_tk=old_token"
+	// initialSnapshot 保存测试账号的 Domain、Path 和 HttpOnly 属性。
+	initialSnapshot := []cookierefresh.BrowserCookie{
+		{Name: "unb", Value: "1", Domain: ".goofish.com", Path: "/"},
+		{Name: "_m_h5_tk", Value: "old_token", Domain: ".goofish.com", Path: "/"},
+		{Name: "scoped", Value: "old", Domain: "h5api.m.goofish.com", Path: "/h5", HTTPOnly: true},
+	}
+	// metadata 是保留业务字段与完整快照的账号 metadata。
+	metadata := cookierefresh.MetadataWithSnapshot(`{"preserved":"yes"}`, initialSnapshot)
+	// err 保存初始权威 Cookie metadata 写入错误。
+	if err := store.Cookies.UpdateRenewalCookie(ctx, "cid", initialCookie, metadata, 1); err != nil {
+		t.Fatal(err)
+	}
+	// session 保存会话更新能力，模拟平台响应先在内存中轮换签名 Cookie。
+	_, session := mtop.WithCookieSnapshot(ctx, initialSnapshot)
+	session.ReplaceSnapshot([]cookierefresh.BrowserCookie{
+		{Name: "unb", Value: "1", Domain: ".goofish.com", Path: "/"},
+		{Name: "_m_h5_tk", Value: "fresh_token", Domain: ".goofish.com", Path: "/"},
+		{Name: "scoped", Value: "new", Domain: "h5api.m.goofish.com", Path: "/h5", HTTPOnly: true},
+	})
+	// snapshotValue、snapshotErr 保存带快照写回后的扁平 Cookie 结果。
+	snapshotValue, snapshotErr := coordinator.persistTaskCookieSession(ctx, "cid", initialCookie, "", &accountTaskCredentialSession{cookieSession: session, persistedValue: initialCookie, persistedMetadata: metadata})
+	if snapshotErr != nil || snapshotValue == initialCookie {
+		t.Fatalf("权威 Cookie 快照未写回 value=%q err=%v", snapshotValue, snapshotErr)
+	}
+	// stored、storedErr 保存数据库中最终的 Cookie 运行视图。
+	stored, storedErr := store.Cookies.GetCookieRuntimeData(ctx, "cid")
+	if storedErr != nil {
+		t.Fatal(storedErr)
+	}
+	// storedSnapshot、complete 检查签名 Cookie 和跨域 Cookie 的完整属性均被保留。
+	storedSnapshot, complete := cookierefresh.SnapshotFromMetadataOK(stored.MetadataJSON)
+	if !complete || storedSnapshot[1].Value != "fresh_token" || storedSnapshot[2].Value != "new" || !strings.Contains(stored.MetadataJSON, `"preserved":"yes"`) {
+		t.Fatalf("权威 Cookie 快照写回不完整 complete=%v snapshot=%+v metadata=%s", complete, storedSnapshot, stored.MetadataJSON)
 	}
 	// fingerprint、fingerprintErr 保存当前平台凭证的不可逆阻断指纹。
 	fingerprint, fingerprintErr := coordinator.accountCredentialFingerprint(ctx, "cid")
