@@ -2,6 +2,10 @@
 Description=Ydisks Xianyu Helper
 After=network-online.target
 Wants=network-online.target
+# 连续失败重启次数上限：阻止「崩溃→重启→重新申请登录凭证→触发风控」的正反馈无限放大。
+# 180 秒窗口内重启超过 5 次后单元进入 failed 状态，需要人工介入而不是继续重试。
+StartLimitIntervalSec=180
+StartLimitBurst=5
 
 [Service]
 Type=simple
