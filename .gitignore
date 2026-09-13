@@ -14,6 +14,7 @@
 /.env
 /.env.*
 !/.env.example
+/compose.override.yml
 
 # Runtime data
 /data/
@@ -43,6 +44,9 @@
 !/internal/webui/static/assets/*.js
 !/internal/webui/static/assets/*.svg
 /internal/webui/static/assets/*.map
+
+# Git worktrees used for task-level isolation (see AGENTS.md task workflow)
+/.worktree/
 
 # OS / editor
 .DS_Store
