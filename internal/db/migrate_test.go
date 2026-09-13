@@ -175,9 +175,9 @@ func TestMigrate_ExistingAutomationRunsReceiveEmptyDeliveryProof(t *testing.T) {
 	if varProof != "" {
 		t.Fatalf("历史运行凭证应为空: %q", varProof)
 	}
-	// finalVersion、versionErr 验证升级包含聊天删除截止线、认证代次和会话角色迁移，不能仅证明旧 delivery_proof 列存在。
+	// finalVersion、versionErr 验证升级包含聊天删除截止线、认证代次、会话角色与凭证冷却迁移，不能仅证明旧 delivery_proof 列存在。
 	finalVersion, versionErr := goose.GetDBVersion(rawDB)
-	if versionErr != nil || finalVersion != 47 {
+	if versionErr != nil || finalVersion != 48 {
 		t.Fatalf("final migration version=%d err=%v", finalVersion, versionErr)
 	}
 	if !tableExists(t, rawDB, "order_ownership_repairs") {
@@ -260,13 +260,13 @@ func TestMigrate_UpgradesDatabaseWithMainChatVersions(t *testing.T) {
 	if !columnExists(t, rawDB, "automation_rule_actions", "delivery_template_id") {
 		t.Fatal("automation_rule_actions should reference delivery templates")
 	}
-	// finalVersion、versionErr 验证迁移账本已推进到会话角色语义的 00047，或记录读取失败。
+	// finalVersion、versionErr 验证迁移账本已推进到凭证冷却持久化的 00048，或记录读取失败。
 	finalVersion, versionErr := goose.GetDBVersion(rawDB)
 	if versionErr != nil {
 		t.Fatalf("read final migration version: %v", versionErr)
 	}
-	if finalVersion != 47 {
-		t.Fatalf("final migration version=%d, want 47", finalVersion)
+	if finalVersion != 48 {
+		t.Fatalf("final migration version=%d, want 48", finalVersion)
 	}
 	if !tableExists(t, rawDB, "order_ownership_repairs") {
 		t.Fatal("已发布 main 数据库升级后必须创建订单归属修正审计表")
