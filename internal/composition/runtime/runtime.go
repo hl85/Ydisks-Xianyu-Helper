@@ -13,6 +13,7 @@ import (
 	"xianyu-go/internal/browser"
 	composition "xianyu-go/internal/composition"
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/heartbeat"
 	"xianyu-go/internal/netguard"
 	"xianyu-go/internal/renewal"
 	"xianyu-go/internal/server"
@@ -73,6 +74,16 @@ func BuildRuntime(options RuntimeOptions, infrastructure RuntimeInfrastructure) 
 	automationScheduler := automation.NewScheduler(runtimeBundle.Automation)
 	// renewalScheduler 负责账号凭证的定期续期，其运行与停止由生命周期协调器统一拥有。
 	renewalScheduler := renewal.NewScheduler(infrastructure.Store, runtimeBundle.Manager, runtimeBundle.Adapter, infrastructure.Logger, runtimeBundle.Notifier)
+	// heartbeatStore 是进程心跳表的持久化边界；供应用内心跳写者与宿主检查共用，只写自有数据库。
+	heartbeatStore := db.NewHeartbeatStore(infrastructure.Store.DB, infrastructure.Store.Dialect, "")
+	// heartbeatWriter 是进程级心跳写者；XIANYU_HEARTBEAT_INTERVAL_SECONDS 为 0 时返回 nil 表示显式关闭。
+	heartbeatWriter := heartbeat.NewWriter(heartbeatStore, infrastructure.Logger)
+	if heartbeatWriter != nil {
+		// addErr 是进程心跳写者登记失败原因；关闭（nil）时不登记，宿主检查发现空表即「未配置」。
+		if addErr := lifecycleCoordinator.Add(lifecycle.NamedComponent{Name: "process-heartbeat", Component: lifecycle.FuncComponent{StartFunc: func(ctx context.Context) error { go heartbeatWriter.Run(ctx); return nil }, CloseFunc: heartbeatWriter.WaitContext}}); addErr != nil {
+			return Runtime{}, fmt.Errorf("登记进程心跳写者失败: %w", addErr)
+		}
+	}
 	// component 是按依赖顺序登记的基础后台组件，协调器负责后续取消和等待。
 	for _, component := range []lifecycle.NamedComponent{
 		{Name: "notifier", Component: lifecycle.FuncComponent{StartFunc: func(ctx context.Context) error { runtimeBundle.Notifier.Start(ctx); return nil }, CloseFunc: runtimeBundle.Notifier.WaitContext}},
