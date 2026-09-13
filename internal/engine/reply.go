@@ -60,21 +60,29 @@ type ReplyService struct {
 	ai       AIReplier  // 可为 nil
 	sender   MessageSender
 	logger   *slog.Logger
+	// reviewNotifier 是 AI 回复人工确认通知器，可选；nil 时只拦截发送、不发确认通知。
+	reviewNotifier ReplyReviewNotifier
 }
 
-// NewReplyService 构造。
+// NewReplyService 构造；末尾变参可选注入 AI 回复人工确认通知器，保持旧调用方兼容。
 func NewReplyService(cookieID string, store *db.Store, sender MessageSender,
-	api APIReplier, ai AIReplier, logger *slog.Logger) *ReplyService {
+	api APIReplier, ai AIReplier, logger *slog.Logger, reviewNotifiers ...ReplyReviewNotifier) *ReplyService {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// reviewNotifier 是首个变参通知器；最多取一个，传 nil 等价于未注入。
+	var reviewNotifier ReplyReviewNotifier
+	if len(reviewNotifiers) > 0 {
+		reviewNotifier = reviewNotifiers[0]
+	}
 	return &ReplyService{
-		cookieID: cookieID,
-		store:    store,
-		api:      api,
-		ai:       ai,
-		sender:   sender,
-		logger:   logger.With("account", cookieID, "subsys", "reply"),
+		cookieID:       cookieID,
+		store:          store,
+		api:            api,
+		ai:             ai,
+		sender:         sender,
+		logger:         logger.With("account", cookieID, "subsys", "reply"),
+		reviewNotifier: reviewNotifier,
 	}
 }
 
@@ -92,6 +100,11 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 	// 发送：图片优先，文本随后。reply_once 使用持久化分段状态，失败时只重试
 	// 尚未成功的部分。
 	if r.sender == nil {
+		return nil
+	}
+	// AI 回复人工确认闸门：review 模式开启时 AI 生成的回复不自动发送，
+	// 改为通知卖家人工确认；AutoPriceQuote 绑定发生在发送成功之后，拦截时自然跳过。
+	if r.interceptAIReplyForReview(ctx, res, m) {
 		return nil
 	}
 	// record 用于本次流程后续判断的record

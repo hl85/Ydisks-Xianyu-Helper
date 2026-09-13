@@ -310,6 +310,8 @@ type Config struct {
 	WSDialer WSDialer
 	// SendGate 可选：覆盖出站发送闸门参数。nil 表示读取环境变量配置；显式传零值表示关闭闸门。
 	SendGate *sendGateConfig
+	// ReplyReviewNotifier 可选：AI 回复人工确认通知器；nil 时确认通知静默跳过，仅拦截发送。
+	ReplyReviewNotifier ReplyReviewNotifier
 }
 
 // New 构造单账号运行时（未启动）。
@@ -364,7 +366,7 @@ func New(cfg Config) *Account {
 	// echoTracker 保存当前账号自动化出站消息的回显等待项；其生命周期与账号 facade 一致。
 	echoTracker := newOutgoingEchoTracker()
 	if cfg.Store != nil {
-		a.reply = NewReplyService(cfg.CookieID, cfg.Store, a, nil, NewAIReplier(cfg.CookieID, cfg.Store, logger), logger)
+		a.reply = NewReplyService(cfg.CookieID, cfg.Store, a, nil, NewAIReplier(cfg.CookieID, cfg.Store, logger), logger, cfg.ReplyReviewNotifier)
 	}
 	// publisher 是平台客户端提供的商品发布人查询能力；缺失时回复门禁保持关闭。
 	publisher, _ := mtopClient.(replyItemPublisher)
