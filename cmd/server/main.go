@@ -27,6 +27,7 @@ import (
 	"xianyu-go/internal/logging"
 	"xianyu-go/internal/logsafe"
 	"xianyu-go/internal/netguard"
+	"xianyu-go/internal/renewal"
 	appversion "xianyu-go/internal/version"
 )
 
@@ -378,6 +379,11 @@ func openServerInfrastructure(ctx context.Context, startup serverStartupConfig, 
 		_ = database.Close()
 		closeLog()
 		return serverInfrastructure{}, fmt.Errorf("校验或升级数据库敏感字段失败: %w", err)
+	}
+	// 把登录恢复冷却接入持久化：进程重启后仍尊重最近的登录失败冷却，
+	// 避免「崩溃→重启→立即重新申请登录凭证→触发风控」的正反馈。恢复失败只告警并退回纯内存冷却，不阻断启动。
+	if attachErr := renewal.GlobalCooldown.AttachPersistence(ctx, store.Renewal, logger); attachErr != nil {
+		logger.Warn("续期冷却持久化未启用，按纯内存模式运行", "err", attachErr)
 	}
 	// outboundPublicOnly 保存用户可配置 HTTP 请求的启动期公网限制快照。
 	if raw, settingErr := store.Settings.Get(ctx, "outbound_http_public_only"); settingErr == nil {
