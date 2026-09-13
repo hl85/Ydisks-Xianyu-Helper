@@ -87,6 +87,8 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 	if res == nil || res.Skip {
 		return nil
 	}
+	// 发送前统一过安全闸门：命中站外导流或违规承诺时换兜底话术，超长截断，并作废不再成立的 AI 报价。
+	r.applyReplySafety(res)
 	// 发送：图片优先，文本随后。reply_once 使用持久化分段状态，失败时只重试
 	// 尚未成功的部分。
 	if r.sender == nil {
