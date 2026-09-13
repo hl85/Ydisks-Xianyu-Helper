@@ -46,11 +46,14 @@ func (c *outgoingMessageCoordinator) sendText(ctx context.Context, chatID, toUse
 	// sendCtx、cancel 限制单次文本发送的最长等待，并在函数返回时释放计时器。
 	sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	// err 是平台文本发送失败原因；此时调用方按是否确定未发送决定重试或人工核对。
-	if err := conn.SendText(sendCtx, myID, chatID, toUserID, text); err != nil {
+	// receipt、err 是平台受理凭证与发送失败原因；凭证取自发送请求自身的响应，与推送回显互为独立证据链。
+	receipt, err := sendTextWithReceipt(conn, sendCtx, myID, chatID, toUserID, text)
+	if err != nil {
 		echoWaiter.cancel()
 		return classifyPlatformSendError(err)
 	}
+	// 平台响应已给出可信受理凭证时立即确认，不再依赖可能不出现的推送回显。
+	confirmEchoWithReceipt(echoWaiter, receipt, myID)
 	// err 是自身回显确认失败原因；失败时必须把发送结果交给上层人工核对。
 	if err := c.confirmOutgoingEcho(ctx, echoWaiter, chatID); err != nil {
 		return err
@@ -95,11 +98,44 @@ func (c *outgoingMessageCoordinator) sendImage(ctx context.Context, chatID, toUs
 	sendCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	_ = cardID // cardID 由上层动作检查点持久化，协议图片发送本身不携带该字段。
-	if err := conn.SendImage(sendCtx, myID, chatID, toUserID, imageURL, width, height); err != nil {
+	// receipt、err 是平台受理凭证与发送失败原因；图片与文本共用同一条确认路径。
+	receipt, err := sendImageWithReceipt(conn, sendCtx, myID, chatID, toUserID, imageURL, width, height)
+	if err != nil {
 		echoWaiter.cancel()
 		return classifyPlatformSendError(err)
 	}
+	confirmEchoWithReceipt(echoWaiter, receipt, myID)
 	return c.confirmOutgoingEcho(ctx, echoWaiter, chatID)
+}
+
+// sendTextWithReceipt 优先使用带平台受理凭证的文本发送；连接未实现该可选能力时退回原有发送语义。
+func sendTextWithReceipt(conn WSConn, ctx context.Context, myID, chatID, toUserID, text string) (ws.SendReceipt, error) {
+	// sender、supported 表示当前连接是否提供平台发送受理凭证。
+	if sender, supported := conn.(interface {
+		SendTextWithReceipt(context.Context, string, string, string, string) (ws.SendReceipt, error)
+	}); supported {
+		return sender.SendTextWithReceipt(ctx, myID, chatID, toUserID, text)
+	}
+	return ws.SendReceipt{}, conn.SendText(ctx, myID, chatID, toUserID, text)
+}
+
+// sendImageWithReceipt 优先使用带平台受理凭证的图片发送；连接未实现该可选能力时退回原有发送语义。
+func sendImageWithReceipt(conn WSConn, ctx context.Context, myID, chatID, toUserID, imageURL string, width, height int) (ws.SendReceipt, error) {
+	// sender、supported 表示当前连接是否提供平台发送受理凭证。
+	if sender, supported := conn.(interface {
+		SendImageWithReceipt(context.Context, string, string, string, string, int, int) (ws.SendReceipt, error)
+	}); supported {
+		return sender.SendImageWithReceipt(ctx, myID, chatID, toUserID, imageURL, width, height)
+	}
+	return ws.SendReceipt{}, conn.SendImage(ctx, myID, chatID, toUserID, imageURL, width, height)
+}
+
+// confirmEchoWithReceipt 在平台受理凭证可信时直接确认等待项；凭证不可信时保持原有推送回显等待语义。
+func confirmEchoWithReceipt(waiter *outgoingEchoWaiter, receipt ws.SendReceipt, accountID string) {
+	if waiter == nil || !receipt.ConfirmsOwnMessage(accountID) {
+		return
+	}
+	waiter.confirm()
 }
 
 // registerOutgoingEcho 按调用上下文决定是否登记自动化出站回显确认；普通人工聊天保持原有非阻塞旁路。

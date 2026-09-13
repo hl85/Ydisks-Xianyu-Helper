@@ -141,8 +141,93 @@ func (c *Conn) sendJSON(ctx context.Context, v any) error {
 	return c.ws.Write(ctx, websocket.MessageText, b)
 }
 
+// SendReceipt 是平台对一次聊天发送请求的受理凭证。
+// 它来自发送请求自身的响应体，与推送回显是两条独立证据链：
+// 平台在该请求的响应里为消息分配了 messageId 并回填了发送者身份，
+// 因此可据此确认「消息已进入平台会话」，无需依赖可能不出现的推送回显。
+type SendReceipt struct {
+	// MessageID 是平台为该条消息分配的消息 ID（形如 <数字>.PNM），为空表示响应未提供受理证据。
+	MessageID string
+	// SenderUserID 是平台回填的消息发送者账号身份，用于排除把他人消息误判为自身发送。
+	SenderUserID string
+	// Summary 是平台给出的消息摘要；图片等媒体可能为空。
+	Summary string
+	// CreateAt 是平台记录的消息创建时间（Unix 毫秒），不可解析时为 0。
+	CreateAt int64
+}
+
+// ConfirmsOwnMessage 判断凭证是否足以证明「当前账号的一条消息已被平台受理」。
+// 只有同时具备非空消息 ID 与自身发送者身份才算成立，避免用不完整响应自欺。
+func (r SendReceipt) ConfirmsOwnMessage(accountID string) bool {
+	// normalizedAccount 是去掉闲鱼协议后缀后的当前账号身份。
+	normalizedAccount := stripGoofish(accountID)
+	if strings.TrimSpace(r.MessageID) == "" || normalizedAccount == "" {
+		return false
+	}
+	return stripGoofish(r.SenderUserID) == normalizedAccount
+}
+
+// extractSendReceipt 从发送响应中提取平台受理凭证；缺失字段保持零值，由调用方决定是否采信。
+func extractSendReceipt(response map[string]any) SendReceipt {
+	// body 是平台发送响应正文；没有 body 时不存在受理证据。
+	body, _ := response["body"].(map[string]any)
+	if body == nil {
+		return SendReceipt{}
+	}
+	// receipt 保存归一化后的消息 ID、发送者身份与摘要。
+	receipt := SendReceipt{MessageID: normalizedTextValue(body["messageId"])}
+	// extension 是平台回填的消息展示扩展，携带发送者身份与摘要。
+	if extension, ok := body["extension"].(map[string]any); ok {
+		receipt.SenderUserID = normalizedTextValue(extension["senderUserId"])
+		receipt.Summary = normalizedTextValue(extension["reminderContent"])
+	}
+	receipt.CreateAt = numberInt64(body["createAt"])
+	return receipt
+}
+
+// normalizedTextValue 返回平台字段的文本形式；nil 与 "<nil>" 统一归为空串。
+func normalizedTextValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "<nil>" {
+		return ""
+	}
+	return text
+}
+
+// numberInt64 把平台返回的数值字段规范为 int64；非整数或不可解析时返回 0。
+func numberInt64(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) {
+			return 0
+		}
+		return int64(typed)
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0
+		}
+		return parsed
+	default:
+		return 0
+	}
+}
+
 // SendText 发送一条闲鱼聊天文本消息。
 func (c *Conn) SendText(ctx context.Context, myID, cid, toID, text string) error {
+	_, err := c.SendTextWithReceipt(ctx, myID, cid, toID, text)
+	return err
+}
+
+// SendTextWithReceipt 发送文本并返回平台受理凭证；凭证仅供调用方做自身消息确认，不参与日志输出。
+func (c *Conn) SendTextWithReceipt(ctx context.Context, myID, cid, toID, text string) (SendReceipt, error) {
 	// content 用于本次流程后续判断的内容
 	content := map[string]any{
 		"contentType": 1,
@@ -150,7 +235,7 @@ func (c *Conn) SendText(ctx context.Context, myID, cid, toID, text string) error
 			"text": text,
 		},
 	}
-	return c.sendChatContent(ctx, myID, cid, toID, content)
+	return c.sendChatContentWithReceipt(ctx, myID, cid, toID, content)
 }
 
 // MarkChatRead 将当前会话的 PNM 消息 ID 上报为已读。
@@ -182,6 +267,12 @@ func (c *Conn) MarkChatRead(ctx context.Context, cid string, messageIDs []map[st
 
 // SendImage 发送一条闲鱼聊天图片消息。imageURL 应为闲鱼可访问的 CDN/公网 URL。
 func (c *Conn) SendImage(ctx context.Context, myID, cid, toID, imageURL string, width, height int) error {
+	_, err := c.SendImageWithReceipt(ctx, myID, cid, toID, imageURL, width, height)
+	return err
+}
+
+// SendImageWithReceipt 发送图片并返回平台受理凭证；语义与 SendTextWithReceipt 一致。
+func (c *Conn) SendImageWithReceipt(ctx context.Context, myID, cid, toID, imageURL string, width, height int) (SendReceipt, error) {
 	if width <= 0 {
 		width = 800
 	}
@@ -200,7 +291,7 @@ func (c *Conn) SendImage(ctx context.Context, myID, cid, toID, imageURL string, 
 			}},
 		},
 	}
-	return c.sendChatContent(ctx, myID, cid, toID, content)
+	return c.sendChatContentWithReceipt(ctx, myID, cid, toID, content)
 }
 
 // SendItemCard 发送一条个人会话商品卡片，载荷与闲鱼 PC IM contentType=7 协议保持一致。
@@ -223,22 +314,28 @@ func (c *Conn) SendItemCard(ctx context.Context, myID, cid, toID, itemID, title,
 	return c.sendChatContent(ctx, myID, cid, toID, content)
 }
 
-// sendChatContent 封装send聊天内容业务协调。
+// sendChatContent 封装send聊天内容业务协调；丢弃受理凭证，供不关心确认细节的调用方使用。
 func (c *Conn) sendChatContent(ctx context.Context, myID, cid, toID string, content any) error {
+	_, err := c.sendChatContentWithReceipt(ctx, myID, cid, toID, content)
+	return err
+}
+
+// sendChatContentWithReceipt 发送聊天内容并返回平台受理凭证；非 200 响应不产生可用凭证。
+func (c *Conn) sendChatContentWithReceipt(ctx context.Context, myID, cid, toID string, content any) (SendReceipt, error) {
 	// err 保存发送开始前的取消状态。
 	if err := ctx.Err(); err != nil {
-		return &SendError{Kind: SendNotSent, Err: err}
+		return SendReceipt{}, &SendError{Kind: SendNotSent, Err: err}
 	}
 	myID = stripGoofish(myID)
 	cid = stripGoofish(cid)
 	toID = stripGoofish(toID)
 	if myID == "" || cid == "" || toID == "" {
-		return &SendError{Kind: SendNotSent, Err: fmt.Errorf("发送消息缺少必要参数")}
+		return SendReceipt{}, &SendError{Kind: SendNotSent, Err: fmt.Errorf("发送消息缺少必要参数")}
 	}
 	// raw、err 用于本次流程后续判断的raw、err
 	raw, err := json.Marshal(content)
 	if err != nil {
-		return &SendError{Kind: SendNotSent, Err: err}
+		return SendReceipt{}, &SendError{Kind: SendNotSent, Err: err}
 	}
 	// encoded 用于本次流程后续判断的encoded
 	encoded := base64.StdEncoding.EncodeToString(raw)
@@ -278,20 +375,21 @@ func (c *Conn) sendChatContent(ctx context.Context, myID, cid, toID string, cont
 	// response 保存平台对本次发送的确认；该请求不会额外创建连接或增加闲鱼调用次数。
 	response, err := c.request(ctx, "/r/MessageSend/sendByReceiverScope", headers, body, regResponseTimeout)
 	if err != nil {
-		return &SendError{Kind: SendUncertain, Err: err}
+		return SendReceipt{}, &SendError{Kind: SendUncertain, Err: err}
 	}
 	// code 和 ok 保存平台发送确认状态码及其严格可解析性。
 	code, ok := strictChatSendResponseCode(response["code"])
 	if !ok {
-		return &SendError{Kind: SendUncertain, Code: code}
+		return SendReceipt{}, &SendError{Kind: SendUncertain, Code: code}
 	}
 	if code == http.StatusOK {
-		return nil
+		// receipt 是平台在同一 mid 的响应里给出的受理凭证；字段缺失时为零值，由调用方决定是否采信。
+		return extractSendReceipt(response), nil
 	}
 	if code >= http.StatusBadRequest && code < http.StatusInternalServerError && code != http.StatusRequestTimeout {
-		return &SendError{Kind: SendRejected, Code: code}
+		return SendReceipt{}, &SendError{Kind: SendRejected, Code: code}
 	}
-	return &SendError{Kind: SendUncertain, Code: code}
+	return SendReceipt{}, &SendError{Kind: SendUncertain, Code: code}
 }
 
 // strictChatSendResponseCode 只接受完整整数形式的聊天发送状态码，避免截断浮点数或接受带尾随字符的字符串。

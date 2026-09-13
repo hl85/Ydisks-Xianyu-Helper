@@ -112,6 +112,38 @@ func (w *outgoingEchoWaiter) cancel() {
 	}
 }
 
+// confirm 由平台发送响应等直接证据触发：摘除本等待项并立即唤醒等待方。
+// 与 cancel 的区别是它关闭 done，表示「已确认」，因此后续 wait 立即成功返回；重复调用安全。
+func (w *outgoingEchoWaiter) confirm() {
+	if w == nil || w.tracker == nil {
+		return
+	}
+	// t 是当前等待项所属的账号级跟踪器；其锁保护待确认列表。
+	t := w.tracker
+	t.mu.Lock()
+	// removed 表示本等待项是否由本次调用摘除；只有摘除成功的一方关闭 done，避免重复关闭 panic。
+	removed := false
+	// waiters 是同一会话、消息类型和正文下仍未完成的等待项。
+	waiters := t.pending[w.key]
+	for index, candidate := range waiters {
+		if candidate != w {
+			continue
+		}
+		waiters = append(waiters[:index], waiters[index+1:]...)
+		if len(waiters) == 0 {
+			delete(t.pending, w.key)
+		} else {
+			t.pending[w.key] = waiters
+		}
+		removed = true
+		break
+	}
+	t.mu.Unlock()
+	if removed {
+		close(w.done)
+	}
+}
+
 // observe 接收消息分发器识别出的自身回显，并唤醒第一个匹配的自动化发送等待项。
 // message 只包含已脱敏的会话、接收人和消息正文摘要，不在此处记录日志。
 func (t *outgoingEchoTracker) observe(message OutgoingChatMessage) {
