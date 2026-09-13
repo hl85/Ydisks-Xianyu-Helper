@@ -38,6 +38,8 @@ const (
 	sendGateDefaultJitter = 1 * time.Second
 	// sendGateMaxWait 是单次发送允许等待的上限；超过它说明配置过于保守，按上限等待以免拖死调用链。
 	sendGateMaxWait = 30 * time.Second
+	// sendCounterRestoreTimeout 是构造期从 DB 恢复当日计数的有限收口预算。
+	sendCounterRestoreTimeout = 5 * time.Second
 )
 
 // ErrSendGateDailyLimit 表示账号当日发送额度已用尽，需要等到次日或由人工提高额度。
@@ -115,6 +117,9 @@ type sendGate struct {
 	cookieID string
 	// logger 用于记录写穿与恢复失败的告警；为空时静默降级。
 	logger *slog.Logger
+	// global 是进程级共享的全局日发送预算；为空表示不启用全局额度。
+	// 锁序约束：gate.mu 与 global.mu 永不嵌套持有，总是先解锁前者再进入后者。
+	global *SendBudget
 }
 
 // attachPersistence 为闸门接入计数持久化，并按 (cookieID, 今天) 从 DB 恢复内存计数。
@@ -176,10 +181,11 @@ func newSendGate(cfg sendGateConfig) *sendGate {
 }
 
 // acquire 在需要时等待，使本次出站发送符合配置的静默时段、日额度与最小间隔约束。
+// 接入全局预算后，即使账号级配置全零也会占用全局槽并写穿账号计数。
 // ctx 是调用方的取消边界；返回错误表示本次发送被拒绝，调用方应把它当作「确定未发送」处理。
 func (g *sendGate) acquire(ctx context.Context) error {
-	// 未装配的闸门（例如测试中直接构造的协调器）不施加任何限制。
-	if g == nil || !g.cfg.enabled() {
+	// 未装配的闸门（例如测试中直接构造的协调器）不施加任何限制；接入全局预算后仍需继续走占用路径。
+	if g == nil || (!g.cfg.enabled() && g.global == nil) {
 		return nil
 	}
 	// now 是本次调用的取时实现；缺省时回落到生产实现，保证零值以外路径也安全。
@@ -227,12 +233,38 @@ func (g *sendGate) acquire(ctx context.Context) error {
 		wait = sendGateMaxWait
 	}
 	// 先占位再放锁：并发调用会依次排到各自的时间片，而不是同时醒来后一起抢跑。
+	// prevLast、prevSent 是占位前的登记快照，供全局额度拒绝时回滚账号槽。
+	prevLast, prevSent := g.lastSentAt, g.sentToday
 	g.lastSentAt = current.Add(wait)
 	g.sentToday++
+	// reservedSent 是占位后的当日计数；回滚时据此判断占用是否已被并发推进覆盖。
+	reservedSent := g.sentToday
 	g.mu.Unlock()
+	// 先账号后全局：账号槽已占用；全局额度拒绝时必须回滚账号槽，否则会凭空消耗账号日额度。
+	if g.global != nil {
+		// globalErr 是全局预算的占用结果；拒绝语义与账号额度一致，归入「确定未发送」。
+		if _, globalErr := g.global.acquire(ctx); globalErr != nil {
+			g.rollbackReservation(today, prevSent, prevLast, reservedSent)
+			return globalErr
+		}
+	}
 	// 写穿在锁外执行：闸门临界区不做 I/O；写穿失败只告警，行为退化为纯内存额度。
 	g.writeThrough(ctx, today)
 	return sleep(ctx, wait)
+}
+
+// rollbackReservation 在全局额度拒绝时归还已占用的账号发送槽。
+// 仅当当日与计数未被并发推进时才回滚，避免覆盖其他并发发送的登记；
+// lastSentAt 一并还原，使一次被拒绝的发送不会拖慢后续发送节奏。
+func (g *sendGate) rollbackReservation(day string, prevSent int, prevLast time.Time, reservedSent int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// 当日已切换或计数已被并发推进时放弃回滚，宁可少退不可错退。
+	if g.day != day || g.sentToday != reservedSent {
+		return
+	}
+	g.sentToday = prevSent
+	g.lastSentAt = prevLast
 }
 
 // inQuietHours 判断给定时刻是否落在配置的静默时段内；时段允许跨越午夜。
