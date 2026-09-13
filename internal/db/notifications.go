@@ -426,3 +426,32 @@ func (n *Notifications) RetryOutbox(ctx context.Context, id int64, workerToken, 
 	count, err := res.RowsAffected()
 	return err == nil && count == 1, err
 }
+
+// AccountIDsWithEnabledChannels 返回至少绑定了一条已启用通知渠道的账号 ID 列表，按 ID 稳定排序。
+// 业务静默这类进程级事件没有归属账号，而通知渠道按账号绑定：
+// 调用方（静默看门狗）从中选择投递宿主账号，保证进程级告警仍能进入既有渠道链路。
+func (n *Notifications) AccountIDsWithEnabledChannels(ctx context.Context) ([]string, error) {
+	// rows、err 用于本次流程后续判断的rows、err
+	rows, err := n.DB.QueryContext(ctx, `
+		SELECT DISTINCT mn.cookie_id
+		  FROM message_notifications mn
+		  JOIN notification_channels nc ON nc.id=mn.channel_id
+		 WHERE mn.enabled=1 AND nc.enabled=1
+		 ORDER BY mn.cookie_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	// out 保存满足条件的账号 ID；无绑定时返回空切片。
+	out := []string{}
+	for rows.Next() {
+		// cookieID 是当前遍历到的账号标识。
+		var cookieID string
+		if // err 用于本次流程后续判断的err
+		err := rows.Scan(&cookieID); err != nil {
+			return nil, err
+		}
+		out = append(out, cookieID)
+	}
+	return out, rows.Err()
+}

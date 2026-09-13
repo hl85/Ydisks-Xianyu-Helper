@@ -9,6 +9,8 @@ import (
 type AnalyticsQueries struct {
 	// DB 是订单分析查询使用的数据库连接。
 	DB *sql.DB
+	// Dialect 决定诊断类只读查询的方言分支（如 CAST 类型名）；零值按 SQLite/Postgres 通用语法处理。
+	Dialect Dialect
 }
 
 // QueryRowContext 执行单行订单分析查询。

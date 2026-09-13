@@ -20,4 +20,8 @@ type CenterDependencies struct {
 	CookieSource func(context.Context, string) (string, error)
 	// APICardFetcher 提供普通 API 卡发货请求能力；为空时 API 卡执行会明确失败。
 	APICardFetcher APICardFetcher
+	// SilenceActivity 读取最近一次业务活动时间，用于业务静默看门狗；为空时禁用看门狗。
+	SilenceActivity BusinessSilenceActivityReader
+	// SilenceAlerter 发送进程级业务静默告警；为空时看门狗只记日志不发通知。
+	SilenceAlerter BusinessSilenceAlerter
 }

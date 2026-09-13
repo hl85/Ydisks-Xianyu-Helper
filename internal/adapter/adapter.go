@@ -165,6 +165,13 @@ func NewRuntimeBundle(store *db.Store, bm *browser.Manager, logger *slog.Logger)
 		OrderDetailFetcher: runtimeAdapter,
 		Notifier:           notifier,
 		APICardFetcher:     newAPIDeliveryClient(store, logger),
+		// 业务静默看门狗：活动时间取自聚合仓储的跨表只读查询，告警走既有通知出口。
+		SilenceActivity: store.Analytics.LatestBusinessActivityAt,
+		SilenceAlerter: &businessSilenceAlerter{
+			notifier: notifier,
+			store:    store,
+			logger:   logger,
+		},
 	})
 	runtimeAdapter.chat = chatService
 	runtimeAdapter.automation = autoCenter
