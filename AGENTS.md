@@ -7,10 +7,10 @@
 
 | 阶段 | 内容 |
 |---|---|
-| 0 开工前 | 环境、编译、必读文档、阶段制度、门禁、任务工作流 |
+| 0 开工前 | 容器执行、编译、必读文档、阶段制度、门禁、任务工作流 |
 | 1 编码中 | 架构、注释、API、前端、数据库、并发、敏感数据、冻结项 |
-| 2 验证 | 测试与覆盖率、门禁命令、禁止事项 |
-| 3 提交与评审 | 提交颗粒度、适配器、打 tag |
+| 2 验证 | 测试与覆盖率、门禁命令、禁止事项、核心链路门槛 |
+| 3 提交与评审 | 提交颗粒度、合并与适配器、打 tag |
 | 4 构建与发布 | 镜像、桌面打包、macOS、CI |
 | 5 仓库与文档 | 目录职责、运行时接线 |
 
@@ -18,36 +18,28 @@
 
 ## 0. 开工前
 
-### 0.1 环境
+### 0.1 容器执行
 
-- 本机没有 Go 工具链，编译与测试一律在容器内执行。
-- docker CLI 不在 PATH，用 Docker.app 里的全路径调用。
-- 容器镜像 golang:1.26，内含 go1.26.8，满足 go.mod 要求。
-- 本机是 Intel Mac，容器是 linux/amd64，产物不能直接在本机运行。
-- 本机磁盘紧张，构建大镜像前先看 df -h 剩余空间。
-
-```bash
-DOCKER=/Applications/Docker.app/Contents/Resources/bin/docker
-REPO=/Users/wanghui/Code/oss-research/Ydisks-Xianyu-Helper
-COMPOSE="$DOCKER compose -f docker-compose.functional.yml"
-cd "$REPO"
-```
+- 所有 Go 编译、测试与静态检查必须在 Docker 容器内执行。
+- 禁止在本机终端直接运行 go、gofmt 或 golangci-lint。
+- 一次性容器统一使用 golang:1.26 镜像。
+- 容器产物是 Linux 二进制，不能直接在桌面系统运行。
+- 下文命令均在仓库根目录执行。
 
 ### 0.2 编译
 
 ```bash
-"$DOCKER" run --rm -v "$REPO":/src -w /src -v ydisks-gomod:/go/pkg/mod \
+docker run --rm -v "$PWD":/src -w /src -v ydisks-gomod:/go/pkg/mod \
   golang:1.26 go build -o /tmp/xianyu-server ./cmd/server
 ```
 
-- 依赖缓存在 ydisks-gomod 卷，首次约 1 分 40 秒。
-- 后续复用该卷，不再重复下载依赖。
+- 依赖缓存用命名卷 ydisks-gomod 挂载，复用免重下。
 - 多入口在同一个容器内串联编译。
 - 禁止为每个入口各起一个容器。
 - cmd/tray 依赖桌面图形库，禁止在容器内构建。
-- 产物禁止写进源码树，统一输出到 /tmp 或 dist。
-- 交叉编译 macOS 产物要指定 GOOS=darwin 与 GOARCH=amd64。
-- 编译报 undefined 时先查并发编辑，别把半成品当缺陷。
+- 产物禁止写进源码树，输出到 /tmp 或 dist。
+- 交叉编译按目标系统指定 GOOS 与 GOARCH。
+- 编译报 undefined 时先确认没有并发编辑。
 
 ### 0.3 必读文档
 
@@ -62,6 +54,7 @@ cd "$REPO"
 | 重构总计划 | docs/architecture/refactoring-master-plan.md |
 | 架构依赖规则 | docs/architecture/dependency-rules.md |
 | 注释标准 | docs/architecture/comment-standard.md |
+| 核心链路覆盖率 | docs/architecture/core-chain-coverage.md |
 | 验证码冻结规范 | docs/slider-captcha-frozen-spec.md |
 
 ### 0.4 阶段制度
@@ -99,7 +92,7 @@ cd "$REPO"
 
 ```bash
 git worktree add ".worktree/<任务名>" -b "<分支名>"
-cd "$REPO/.worktree/<任务名>"
+cd ".worktree/<任务名>"
 ```
 
 ---
@@ -153,11 +146,11 @@ cd "$REPO/.worktree/<任务名>"
 - 基线重新生成要经评审并记录范围。
 
 ```bash
-# Go 侧注释门禁（本机无 Go，走容器）
-"$DOCKER" run --rm -v "$REPO":/src -w /src -v ydisks-gomod:/go/pkg/mod \
+# Go 侧注释门禁（容器内执行）
+docker run --rm -v "$PWD":/src -w /src -v ydisks-gomod:/go/pkg/mod \
   golang:1.26 go run ./tools/commentlint -mode check -root .
 
-# 前端侧注释门禁（本机有 Node，可本机执行）
+# 前端侧注释门禁（Node 环境执行）
 npm --prefix frontend run comments:check
 ```
 
@@ -296,23 +289,22 @@ npm --prefix frontend run comments:check
 
 ```bash
 # Go 覆盖率（容器内，默认不启 Chromium）
-"$DOCKER" run --rm -v "$REPO":/src -w /src -v ydisks-gomod:/go/pkg/mod \
+docker run --rm -v "$PWD":/src -w /src -v ydisks-gomod:/go/pkg/mod \
   golang:1.26 sh -c 'go test -coverprofile=cover.out ./... && go tool cover -func=cover.out | tail -1'
 
-# 前端覆盖率（本机 Node 可执行）
+# 前端覆盖率（Node 环境执行）
 npm --prefix frontend run test:coverage
 ```
 
 ### 2.2 门禁命令
 
 ```bash
-"$COMPOSE" build go-test go-lint     # 首次构建检查镜像
-"$COMPOSE" run --rm go-vet           # go vet ./...
-"$COMPOSE" run --rm go-lint          # golangci-lint，基线 0 issue
-"$COMPOSE" run --rm go-test          # go test -race -timeout=20m ./...
+docker compose -f docker-compose.functional.yml build go-test go-lint
+docker compose -f docker-compose.functional.yml run --rm go-vet
+docker compose -f docker-compose.functional.yml run --rm go-lint
+docker compose -f docker-compose.functional.yml run --rm go-test
 ```
 
-- golang:1.26 镜像没有 golangci-lint。
 - lint 必须走 Dockerfile.test 的 go-lint 阶段。
 - go-test 依赖健康的 mysql 与 postgres。
 - 执行 compose run 时会自动拉起这两个数据库。
@@ -337,7 +329,7 @@ npm --prefix frontend run test:coverage
 
 - 任何代码改动提交前必须回归受影响包的单元测试。
 - 改完 Go 代码必须重跑受影响包测试并出具覆盖率。
-- 核心链路文件清单与例外登记在 docs/architecture/core-chain-coverage.md。
+- 核心链路清单与例外登记在 core-chain-coverage.md。
 - 核心链路文件改动后，该文件语句覆盖率必须回到 100%。
 - 核心链路新增代码必须与测试同批提交，禁止先提交后补测。
 - 修缺陷必须先写一条能复现该缺陷的失败测试。
@@ -354,7 +346,7 @@ npm --prefix frontend run test:coverage
 
 ```bash
 # 核心链路覆盖率（容器内；必须显式列出全部链路包，否则跨包覆盖不会被统计）
-"$DOCKER" run --rm -v "$REPO":/src -w /src -v ydisks-gomod:/go/pkg/mod \
+docker run --rm -v "$PWD":/src -w /src -v ydisks-gomod:/go/pkg/mod \
   golang:1.26 sh -c 'go test -coverprofile=cover-core.out \
     ./internal/automation ./internal/engine ./internal/adapter ./internal/db ./internal/xianyu/ws \
     && go tool cover -func=cover-core.out | tail -1'
@@ -377,14 +369,11 @@ npm --prefix frontend run test:coverage
 
 - 任务完成后按 commit、merge、push 三步走。
 - merge 使用 --no-ff，保留任务的整体边界。
-- push 前先核实 remote。
-- origin 通常指向上游仓库且无推送权限。
-- 需要推送时先加自己有权限的 fork 作为 origin。
+- push 前先核实 remote 指向与推送权限。
 - 兼容适配器保留到调用方迁移完且契约测试证明可删。
 - 紧急缺陷或安全修复可先于总计划，但须范围窄并记入。
 
 ```bash
-cd "$REPO"
 git merge --no-ff "<分支名>"
 git push origin main
 ```
@@ -413,25 +402,12 @@ git tag -a "<版本>-local-<日期>" -m "<中文说明：解决了什么问题>"
 - Dockerfile.debian13 依次构建前端、编译后端、装配 Playwright。
 - compose.override.yml 把 app 指向本地镜像并禁用拉取。
 - .docker/playwright-runtime 为空时会联网下载 Chromium，很慢。
+- 替换本地镜像前先给旧镜像打 rollback 备份 tag。
 
 ```bash
-"$DOCKER" build -f Dockerfile.debian13 -t ydisks-xianyu-helper:local .
-"$DOCKER" compose up -d app      # 用本地镜像重启 app
-```
-
-- buildx 报权限错误时不要反复重试。
-- 改用 create、cp、commit 手工构造镜像。
-- 手工建镜像后必须校验二进制一致。
-
-```bash
-"$DOCKER" tag ydisks-xianyu-helper:local ydisks-xianyu-helper:rollback-<日期>
-CID=$("$DOCKER" create ghcr.io/christ9038/ydisks-xianyu-helper:latest)
-"$DOCKER" cp /tmp/xianyu-server "$CID:/app/xianyu-server"
-"$DOCKER" commit "$CID" ydisks-xianyu-helper:local
-"$DOCKER" rm "$CID"
-"$DOCKER" run --rm --entrypoint sh ydisks-xianyu-helper:local -c "md5sum /app/xianyu-server"
-md5 -q /tmp/xianyu-server
-"$DOCKER" compose up -d app
+docker build -f Dockerfile.debian13 -t ydisks-xianyu-helper:local .
+docker tag ydisks-xianyu-helper:local ydisks-xianyu-helper:rollback-<日期>
+docker compose up -d app      # 用本地镜像重启 app
 ```
 
 ### 4.2 桌面打包
@@ -472,7 +448,7 @@ md5 -q /tmp/xianyu-server
 - macOS 安装包必须用 build-pkg.sh 构建。
 - 禁止手工复制 Chromium 或 driver 到 dist。
 - runtime 不完整时脚本会自动整理。
-- prepare-runtime.sh 读取本机 Playwright 缓存目录。
+- prepare-runtime.sh 读取打包机的 Playwright 缓存目录。
 - 缓存未就绪时先运行 browser-install。
 - 不要只复制 chromium，还需同版本 headless shell。
 - 打包前必须确认包内 runtime 能启动并通过健康检查。
@@ -513,7 +489,7 @@ md5 -q /tmp/xianyu-server
 - 生产账号恢复先走协议级续期，再要求扫码登录。
 - 账号恢复禁止调用浏览器密码登录。
 - 浏览器契约要与 server 和 engine 调用方保持一致。
-- Vite 把后端路由代理到本机 59188。
+- Vite 把后端路由代理到本地 59188。
 - 前端构建用 npm --prefix frontend run build。
 - 前端开发服务器用 npm --prefix frontend run dev。
 - 改动源码后要重建前端，保证嵌入产物最新。
@@ -525,6 +501,8 @@ md5 -q /tmp/xianyu-server
 ## 维护本文件
 
 - 一条规则一句话，每句不超过 50 字。
+- 规则只描述本项目自身的约束与流程。
+- 不写入特定机器的环境信息或外部项目引用。
 - 新规则放进对应阶段与性质的小节。
 - 命令只放代码块，不写成段落。
 - 改动规则要同步更新本文件，不留过期条目。
