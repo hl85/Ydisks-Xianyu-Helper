@@ -754,6 +754,67 @@ go run ./cmd/server -init-admin -db data/xianyu_data.db -admin-password '新密�
 
 提交安全问题时，请先阅读[安全策略](SECURITY.md)，避免在公开 Issue 中附带真实凭证或用户数据。
 
+## 进程心跳与存活检查
+
+本程序内置**进程级心跳**，用于让宿主（Docker healthcheck / systemd / 运维脚本）判断
+「这个进程到底还活着吗」，补上业务看门狗（挂在自动化调度循环上）覆盖不到的场景——
+当调度循环自身卡死时，看门狗跟着一起死，而心跳由进程级生命周期统一拥有的独立 goroutine
+持续打点，只要 Go 调度器还能推进就能被发现停滞。
+
+> 红线：心跳**绝不发起任何闲鱼平台请求**。它只更新内存时间戳 + 写我们自己的数据库 +
+> （可选）写日志，不发消息、不调 mtop、不刷新 cookie、不重新登录、不重连 WebSocket。
+> 这一点由 `internal/heartbeat` 包的 `platform_guard_test.go` 静态断言所有心跳相关文件
+> 不 import 任何平台包来保证。
+
+### 配置
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `XIANYU_HEARTBEAT_INTERVAL_SECONDS` | `30` | 心跳写周期（秒）。设为 `0` 关闭；未配置或非法值回落默认 30；有效正数即生效。 |
+
+心跳写者由组合根作为生命周期组件登记：进程取消（收到 SIGINT/SIGTERM）即停止写循环，
+关闭流程会等待其 goroutine 收束，不留孤儿协程。
+
+### 只读宿主检查入口 `cmd/heartbeatcheck`
+
+本仓库提供只读 CLI，读取最近一次心跳并判断是否过期，返回退出码供外部探活：
+
+```bash
+# 退出码：0=健康；1=心跳过期或尚未配置；2=无法确定（连接/读取失败）
+go run ./cmd/heartbeatcheck -db-url "postgres://user:pass@host:5432/db?sslmode=disable" -timeout 90
+go run ./cmd/heartbeatcheck -db-url "mysql://user:pass@tcp(host:3306)/db?parseTime=true" -timeout 90
+go run ./cmd/heartbeatcheck -db-url "sqlite://data/xianyu_data.db" -timeout 90
+# 缺省读 DATABASE_URL，再缺省用 data/xianyu_data.db
+go run ./cmd/heartbeatcheck -timeout 90
+```
+
+`-timeout` 是心跳容忍窗口（秒），超过该时长无新心跳即判过期；`-instance` 是进程实例键，
+需与服务器的实例键（单实例默认为 `default`）一致。该命令只执行 `SELECT`（打开阶段幂等迁移
+在已是最新版本时为空操作），不影响任何业务数据。
+
+### Docker healthcheck 示例
+
+将 `heartbeatcheck` 编入镜像后，即可用以下 `healthcheck` 让 Docker 自动探活
+（需把二进制加入镜像，或挂载包含该二进制的辅助容器）：
+
+```yaml
+services:
+  app:
+    image: ydisks-xianyu-helper:local
+    environment:
+      XIANYU_HEARTBEAT_INTERVAL_SECONDS: "30"
+    healthcheck:
+      # 进程每 30s 打点；这里给 90s 容忍窗口，允许一次周期抖动
+      test: ["CMD", "./heartbeatcheck", "-db-url", "$$DATABASE_URL", "-timeout", "90"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+```
+
+systemd 下可用 `ExecStartPost` 配合外部脚本周期性调用 `heartbeatcheck`，或通过
+`WatchdogSec` 与本进程自身存活信号组合使用；发现 `STALE` 输出即触发重启或告警。
+
 ## 开源协议
 
 本项目采用 [Apache License 2.0](LICENSE) 开源，版权所有 © 2026 Christ9038。
