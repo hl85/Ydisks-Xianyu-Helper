@@ -29,6 +29,8 @@ type Manager struct {
 	store   *db.Store
 	handler engine.Handler
 	logger  *slog.Logger
+	// reviewNotifier 是 AI 回复人工确认通知器，可选；nil 时账号运行时只拦截发送、不发确认通知。
+	reviewNotifier engine.ReplyReviewNotifier
 
 	mu       sync.Mutex
 	accounts map[string]*managedAccount
@@ -50,17 +52,23 @@ type managedAccount struct {
 	err      error
 }
 
-// NewManager 构造管理器。
-func NewManager(store *db.Store, handler engine.Handler, logger *slog.Logger) *Manager {
+// NewManager 构造管理器；末尾变参可选注入 AI 回复人工确认通知器，保持旧调用方兼容。
+func NewManager(store *db.Store, handler engine.Handler, logger *slog.Logger, reviewNotifiers ...engine.ReplyReviewNotifier) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// reviewNotifier 是首个变参通知器；最多取一个，传 nil 等价于未注入。
+	var reviewNotifier engine.ReplyReviewNotifier
+	if len(reviewNotifiers) > 0 {
+		reviewNotifier = reviewNotifiers[0]
+	}
 	return &Manager{
-		store:    store,
-		handler:  handler,
-		logger:   logger,
-		accounts: make(map[string]*managedAccount),
-		stopping: make(map[string]struct{}),
+		store:          store,
+		handler:        handler,
+		logger:         logger,
+		reviewNotifier: reviewNotifier,
+		accounts:       make(map[string]*managedAccount),
+		stopping:       make(map[string]struct{}),
 	}
 }
 
@@ -136,6 +144,8 @@ func (m *Manager) Start(ctx context.Context, cookieID, cookieValue string) error
 		Store:     m.store,
 		Handler:   m.handler,
 		Logger:    m.logger,
+		// 透传 AI 回复人工确认通知器；未注入时为 nil，账号运行时按无通知降级。
+		ReplyReviewNotifier: m.reviewNotifier,
 	})
 	// accCtx、cancel 用于本次流程后续判断的accCtx、cancel
 	accCtx, cancel := context.WithCancel(ctx)
