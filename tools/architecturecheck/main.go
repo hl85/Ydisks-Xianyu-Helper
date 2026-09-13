@@ -86,7 +86,17 @@ func checkRepository(root string) ([]violation, error) {
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || filepath.Ext(path) != ".go" {
+		if entry.IsDir() {
+			// name 是目录名；.worktree 是本地任务工作区（内含其它分支的过期源码快照）、
+			// .git 是版本库元数据，两者都不是真实源码，必须整目录跳过，
+			// 否则从主工作区跑门禁会把嵌套工作区的副本误判为生产文件。
+			name := entry.Name()
+			if name == ".worktree" || name == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
 			return nil
 		}
 		// relativePath 是当前文件相对于仓库根目录的路径。
