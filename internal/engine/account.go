@@ -306,6 +306,8 @@ type Config struct {
 	Renewer cookieRenewer
 	// WSDialer 可选：用于测试隔离原生 WebSocket 握手。
 	WSDialer WSDialer
+	// SendGate 可选：覆盖出站发送闸门参数。nil 表示读取环境变量配置；显式传零值表示关闭闸门。
+	SendGate *sendGateConfig
 }
 
 // New 构造单账号运行时（未启动）。
@@ -377,8 +379,13 @@ func New(cfg Config) *Account {
 	})
 	// connection 保存绑定当前账号 facade 的连接编排组件；它只在构造完成后才可被 Run 调用。
 	a.connection = connectionCoordinator{account: a}
+	// gateConfig 是本次装配使用的发送闸门参数：显式配置优先，否则采用环境变量解析出的默认值。
+	gateConfig := sendGateConfigFromEnv()
+	if cfg.SendGate != nil {
+		gateConfig = *cfg.SendGate
+	}
 	// outgoing 保存绑定当前账号 facade 的出站消息协调器；它只读取连接快照后执行外部 I/O。
-	a.outgoing = outgoingMessageCoordinator{account: a, echoTracker: echoTracker}
+	a.outgoing = outgoingMessageCoordinator{account: a, echoTracker: echoTracker, gate: newSendGate(gateConfig)}
 	// credentials 保存绑定当前账号 facade 的凭证协调器；外部凭证 I/O 均由它控制锁边界。
 	a.credentials = credentialCoordinator{account: a}
 	return a

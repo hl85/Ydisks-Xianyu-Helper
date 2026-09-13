@@ -22,6 +22,23 @@ type outgoingMessageCoordinator struct {
 	echoTracker *outgoingEchoTracker
 	// echoWaitTimeout 是测试可覆盖的回显确认预算；生产默认使用固定的有限等待时间。
 	echoWaitTimeout time.Duration
+	// gate 是账号级出站发送闸门；为空表示该账号未启用限流。
+	gate *sendGate
+}
+
+// acquireSendSlot 通过账号闸门为本次出站获取发送时间片；闸门未装配时不产生任何限制。
+func (c *outgoingMessageCoordinator) acquireSendSlot(ctx context.Context) error {
+	// gate 是当前协调器持有的发送闸门；为空表示该账号未启用限流。
+	gate := c.gate
+	if gate == nil {
+		return nil
+	}
+	// err 是闸门给出的拒绝原因；必须归入「确定未发送」，否则自动化会把本次发送误判为结果不确定。
+	// 这里用 Join 同时保留闸门原始原因，调用方仍能区分是额度用尽还是静默时段拒绝。
+	if err := gate.acquire(ctx); err != nil {
+		return errors.Join(automation.ErrMessageNotSent, err)
+	}
+	return nil
 }
 
 // sendText 使用当前已注册 WebSocket 发送文本，并在平台接受后通知可选的聊天旁路。
@@ -39,6 +56,10 @@ func (c *outgoingMessageCoordinator) sendText(ctx context.Context, chatID, toUse
 	// conn、myID、err 保存锁外发送所需的连接与账号身份快照，以及读取失败原因。
 	conn, myID, err := c.currentSenderState()
 	if err != nil {
+		return err
+	}
+	// 连接就绪后先过发送闸门：额度或静默时段不允许时立刻返回，不占用回显等待窗口。
+	if err := c.acquireSendSlot(ctx); err != nil {
 		return err
 	}
 	// echoWaiter 必须在平台写入前登记，防止闲鱼回显先到而错过确认窗口。
@@ -90,6 +111,10 @@ func (c *outgoingMessageCoordinator) sendImage(ctx context.Context, chatID, toUs
 	// conn、myID、err 保存锁外图片发送所需的连接与账号身份快照，以及读取失败原因。
 	conn, myID, err := c.currentSenderState()
 	if err != nil {
+		return err
+	}
+	// 连接就绪后先过发送闸门：图片与文本共用同一份账号额度与节奏。
+	if err := c.acquireSendSlot(ctx); err != nil {
 		return err
 	}
 	// echoWaiter 必须在图片写入前登记；图片回显使用平台返回的同类媒体正文进行匹配。
@@ -178,6 +203,10 @@ func (c *outgoingMessageCoordinator) sendItemCard(ctx context.Context, chatID, t
 	conn, myID, stateErr := c.currentSenderState()
 	if stateErr != nil {
 		return stateErr
+	}
+	// 连接就绪后先过发送闸门：商品卡片同样计入账号额度与发送节奏。
+	if err := c.acquireSendSlot(ctx); err != nil {
+		return err
 	}
 	// itemSender 和 supported 表示当前连接是否支持商品卡片扩展协议。
 	itemSender, supported := conn.(interface {
