@@ -57,9 +57,10 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	if err != nil || cfg == nil || !cfg.AIEnabled {
 		return nil, nil // 未启用 AI
 	}
-	// AI 设置面向砍价场景。普通未命中消息继续交给默认回复，避免 AI
-	// 抢答问候、售后等与砍价无关的消息。
-	if !bargainMessageRe.MatchString(strings.ToLower(m.Text)) {
+	// 意图注册表做规则前置：AI 只接管明确的砍价意图；投诉/售后类消息即使夹带砍价
+	// 表达也交给默认回复与人工处理，避免 AI 在纠纷场景即兴承诺或降价。
+	// 其余意图（order/inquiry/consult）保持既有路由不变，仍走默认回复。
+	if !aiShouldHandleIntent(classifyIntent(m.Text)) {
 		return nil, nil
 	}
 	// aiCfg、err 用于本次流程后续判断的人工智能Cfg、err
