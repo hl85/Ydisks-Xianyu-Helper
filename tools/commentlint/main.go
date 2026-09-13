@@ -232,8 +232,9 @@ func shouldSkipDirectory(path, root string) bool {
 		return false
 	}
 	// ignoredNames 是不属于业务源码、不能进入注释门禁的目录集合。
+	// .worktree 是本地任务工作区，内含其它分支的过期源码快照，扫描它会把快照的违规算进真实源码头顶。
 	ignoredNames := map[string]bool{
-		".git": true, "vendor": true, "node_modules": true, "dist": true,
+		".git": true, ".worktree": true, "vendor": true, "node_modules": true, "dist": true,
 		"browser_data": true, "data": true, "internal/webui/static": true,
 	}
 	if ignoredNames[relativePath] {
