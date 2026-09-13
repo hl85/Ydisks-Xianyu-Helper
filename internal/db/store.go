@@ -105,7 +105,7 @@ func NewStore(db *sql.DB, dialect Dialect) *Store {
 		Chats:             &ChatStore{DB: db, Dialect: dialect},
 		AccountTasks:      &AccountTaskStore{DB: db, Dialect: dialect},
 		Admin:             &AdminQueries{DB: db},
-		Analytics:         &AnalyticsQueries{DB: db},
+		Analytics:         &AnalyticsQueries{DB: db, Dialect: dialect},
 		credentialLocks:   make(map[string]*credentialLockEntry),
 	}
 }

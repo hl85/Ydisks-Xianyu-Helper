@@ -208,6 +208,8 @@ func (s *Scheduler) scan(ctx context.Context) {
 	s.scanPendingShipDeliveries(ctx)
 	// 待发货续跑扫描：运行已经产生但未做完（例如消息动作结果不确定后被隔离），需从检查点继续。
 	s.scanPendingShipResumes(ctx)
+	// 业务静默看门狗：进程健康但业务表长时间零事件时告警；生命周期继承本扫描循环的 ctx。
+	s.center.checkBusinessSilence(ctx)
 	// accountID、count 表示当前遍历过程中的账号ID、count
 	for accountID, count := range waitingForWS {
 		s.center.logger.Info("账号 WebSocket 尚未就绪，求评价任务等待下次扫描", "account", accountID, "orders", count)

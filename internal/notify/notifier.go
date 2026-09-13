@@ -41,6 +41,9 @@ const (
 	// EventManualDeliveryResult 表示人工发货结果通知；它与四种自动化任务分开筛选。
 	EventManualDeliveryResult = "manual_delivery_result"
 	EventSystemError          = "system_error"
+	// EventBusinessSilence 表示业务静默看门狗告警：进程健康但业务表长时间零事件。
+	// 这是进程级事件，由看门狗选择投递宿主账号后走该账号绑定的通知渠道。
+	EventBusinessSilence = "business_silence"
 	// legacyNotifierOperationTimeout 是兼容无 Context 通知与等待入口的最长数据库或网络预算。
 	legacyNotifierOperationTimeout = 10 * time.Second
 )

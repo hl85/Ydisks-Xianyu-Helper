@@ -119,6 +119,8 @@ type Center struct {
 	logger     *slog.Logger
 	// dependencies 拥有生产构造时固定的外部依赖快照，运行期间不可替换。
 	dependencies centerDependencies
+	// silence 是业务静默看门狗；未装配活动读取函数时为 nil，扫描循环跳过检查。
+	silence *silenceWatchdog
 }
 
 // centerDependencies 集中拥有自动化中心构造后不可变的外部依赖。
@@ -137,6 +139,10 @@ type centerDependencies struct {
 	cookieSrc func(context.Context, string) (string, error)
 	// apiFetcher 提供普通 API 卡发货请求能力。
 	apiFetcher APICardFetcher
+	// silenceActivity 读取最近业务活动时间，用于业务静默看门狗；为空时禁用看门狗。
+	silenceActivity BusinessSilenceActivityReader
+	// silenceAlerter 是可选的业务静默告警发送器；为空时看门狗只记日志不发通知。
+	silenceAlerter BusinessSilenceAlerter
 }
 
 // New 构造使用默认协议实现的自动化中心。
@@ -178,9 +184,13 @@ func NewWithDependencies(store *db.Store, senders SenderProvider, logger *slog.L
 			notifier:          dependencies.Notifier,
 			cookieSrc:         dependencies.CookieSource,
 			apiFetcher:        dependencies.APICardFetcher,
+			silenceActivity:   dependencies.SilenceActivity,
+			silenceAlerter:    dependencies.SilenceAlerter,
 		},
 		logger: logger.With("subsys", "automation"),
 	}
+	// 业务静默看门狗在构造期装配：活动读取函数未注入时返回 nil，扫描循环跳过检查。
+	center.silence = newSilenceWatchdog(center.dependencies.silenceActivity, center.dependencies.silenceAlerter, center.logger)
 	if // recoverer、ok 保存订单详情查询器提供的凭证恢复能力及类型判断结果
 	recoverer, ok := center.dependencies.fetcher.(CredentialRecoverer); ok {
 		center.dependencies.recoverer = recoverer
@@ -234,6 +244,15 @@ func NewWithDependencies(store *db.Store, senders SenderProvider, logger *slog.L
 		notifyResult:             center.notifyResult,
 	}
 	return center
+}
+
+// checkBusinessSilence 执行一次业务静默检查；未装配看门狗时为空操作。
+// 该方法只被 Scheduler 的扫描循环调用，生命周期继承该循环的 ctx。
+func (c *Center) checkBusinessSilence(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	c.silence.check(ctx)
 }
 
 // RunAccountTask 执行指定账号任务，并保持 Center 的公开兼容入口。
