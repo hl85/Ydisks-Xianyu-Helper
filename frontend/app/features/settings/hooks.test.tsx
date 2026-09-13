@@ -275,4 +275,44 @@ describe('useSettings', /* 当前回调处理系统设置、模型和凭据请�
     expect(hook.result.current.settings?.ai_model).toBe('');
     hook.unmount();
   });
+
+  test('保存系统配置不会中断正在进行的凭据保存', /* 当前回调验证两类表单请求使用独立取消代次。 */ async () => {
+    // resolveCredentials 是延迟凭据请求的完成控制器。
+    let resolveCredentials: (value: OperationResponse) => void = () => undefined;
+    // pendingCredentialsRequest 模拟尚未返回的凭据保存请求。
+    const pendingCredentialsRequest = new Promise<OperationResponse>(/* credentialsExecutor 保存凭据请求完成函数。 */ resolve => { resolveCredentials = resolve; });
+    updateCredentialsMock.mockReturnValueOnce(pendingCredentialsRequest);
+    // hook 是两个保存动作并发场景下的 Hook 渲染结果。
+    const hook = renderHook(renderSettingsHook);
+    await waitFor(
+      // statusAssertion 等待初始设置加载完成。
+      () => expect(hook.result.current.requestStatus).toBe('success'),
+    );
+    await act(
+      // credentialsAction 写入可提交的登录凭据。
+      () => hook.result.current.setCredentials({ new_username: 'new-admin', current_password: 'old-password', new_password: 'new-password', confirm_password: 'new-password' }),
+    );
+    // credentialsEvent 是提交凭据表单所需的最小浏览器事件。
+    const credentialsEvent = { preventDefault: vi.fn() } as unknown as React.FormEvent;
+    // credentialsAction 发起保持未完成的凭据保存。
+    let credentialsAction: Promise<void> = Promise.resolve();
+    act(/* startCredentialsAction 启动凭据保存但不等待远端响应。 */ () => { credentialsAction = hook.result.current.handleCredentialsSave(credentialsEvent); });
+    await waitFor(
+      // savingAssertion 等待凭据表单进入保存状态。
+      () => expect(hook.result.current.credentialsSaving).toBe(true),
+    );
+    await act(
+      // settingsAction 在凭据保存期间提交系统配置。
+      async () => hook.result.current.handleSave(),
+    );
+    expect(hook.result.current.credentialsSaving).toBe(true);
+    resolveCredentials({ success: true, message: '凭据已更新' });
+    await act(
+      // completeCredentialsAction 完成仍然有效的凭据请求。
+      async () => credentialsAction,
+    );
+    expect(hook.result.current.credentialsSaving).toBe(false);
+    expect(hook.result.current.credentialsMessage).toEqual({ type: 'success', text: '凭据已更新' });
+    hook.unmount();
+  });
 });

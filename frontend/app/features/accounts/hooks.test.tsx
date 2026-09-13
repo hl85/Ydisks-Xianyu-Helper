@@ -20,7 +20,7 @@ const getRuntimeMock = vi.mocked(getAccountRuntimeStatuses);
 const getAISettingsMock = vi.mocked(getAllAISettings);
 
 // accountFixture 是账号列表 Hook 测试使用的基础账号对象。
-const accountFixture: AccountDetail = { id: 'account-1', enabled: true, auto_confirm: false, remark: '测试账号' };
+const accountFixture: AccountDetail = { id: 'account-1', enabled: true, auto_confirm: false, auto_consign: false, remark: '测试账号' };
 
 describe('useAccountsData', /* 当前回调处理账号详情、AI 配置和运行状态轮询。 */ () => {
   beforeEach(/* 当前回调重置账号 API 替身和日志输出。 */ () => {

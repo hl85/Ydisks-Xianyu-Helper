@@ -84,6 +84,8 @@ type Draft struct {
 	TextContent string
 	// DataContent 是 data 类型必须提供的非空逐行库存。
 	DataContent string
+	// DataContentSet 表示请求是否明确提交了库存正文；省略时 data 元数据更新保留现有库存。
+	DataContentSet bool
 	// ImageURL 是 image 类型必须提供的非空图片地址。
 	ImageURL string
 	// Description 是用户维护的卡券组说明。
@@ -94,10 +96,16 @@ type Draft struct {
 	DelaySeconds int
 	// IsMultiSpec 表示卡券组是否只匹配指定商品规格。
 	IsMultiSpec bool
+	// IsMultiSpecSet 表示请求是否明确提交了多规格开关；未提交时更新应保留旧值。
+	IsMultiSpecSet bool
 	// SpecName 是多规格匹配使用的规格名称。
 	SpecName string
+	// SpecNameSet 表示请求是否明确提交了规格名称；未提交时更新应保留旧值。
+	SpecNameSet bool
 	// SpecValue 是多规格匹配使用的规格值。
 	SpecValue string
+	// SpecValueSet 表示请求是否明确提交了规格值；未提交时更新应保留旧值。
+	SpecValueSet bool
 }
 
 // Repository 定义卡券 CRUD 用例所需的最小持久化能力。
@@ -112,6 +120,8 @@ type Repository interface {
 	Create(ctx context.Context, card Card) (int64, error)
 	// Update 覆盖指定卡券组的可编辑字段，但不得改变所有者。
 	Update(ctx context.Context, card Card) error
+	// UpdateDataMetadata 只更新 data 卡券元数据并保留并发变化的库存正文。
+	UpdateDataMetadata(ctx context.Context, card Card) error
 	// Delete 删除指定卡券组及数据库约束允许级联清理的关联数据。
 	Delete(ctx context.Context, cardID int64) error
 	// AppendData 向 data 类型卡券组追加逐行卡密，并返回新增行数。
@@ -203,11 +213,43 @@ func (s *Service) Update(ctx context.Context, userID, cardID int64, draft Draft)
 		}
 		draft.APIConfig = normalized
 	}
+	if draft.Type == existing.Type {
+		// 未明确提交的多规格字段沿用现有值，避免普通编辑把匹配条件清空。
+		if !draft.IsMultiSpecSet {
+			draft.IsMultiSpec = existing.IsMultiSpec
+		}
+		if !draft.SpecNameSet {
+			draft.SpecName = existing.SpecName
+		}
+		if !draft.SpecValueSet {
+			draft.SpecValue = existing.SpecValue
+		}
+	}
+	if draft.Type == "data" && existing.Type == "data" && !draft.DataContentSet {
+		// err 表示数据卡元数据校验错误；库存正文由数据库保留，不参与本次更新。
+		if err := validateDataMetadataDraft(draft); err != nil {
+			return err
+		}
+		// metadataCard 保存不携带库存正文的元数据更新模型。
+		metadataCard := cardFromDraft(existing.ID, existing.UserID, draft)
+		return s.repository.UpdateDataMetadata(ctx, metadataCard)
+	}
 	// err 表示卡券草稿未满足类型、内容或延迟范围约束的校验错误。
 	if err := validateDraft(draft); err != nil {
 		return err
 	}
 	return s.repository.Update(ctx, cardFromDraft(existing.ID, existing.UserID, draft))
+}
+
+// validateDataMetadataDraft 校验数据卡元数据字段，允许库存已经耗尽时继续改名或切换状态。
+func validateDataMetadataDraft(draft Draft) error {
+	if draft.Name == "" || draft.Type != "data" {
+		return &ValidationError{Message: "名称和类型不能为空"}
+	}
+	if draft.DelaySeconds < 0 || draft.DelaySeconds > 3600 {
+		return &ValidationError{Message: "延时发货必须在 0 到 3600 秒之间"}
+	}
+	return nil
 }
 
 // Delete 校验 cardID 归属后删除卡券组；删除仓储错误原样返回。

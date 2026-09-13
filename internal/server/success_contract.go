@@ -312,6 +312,8 @@ type cookieDetailResponse struct {
 	Enabled bool `json:"enabled"`
 	// AutoConfirm 表示是否自动确认订单。
 	AutoConfirm bool `json:"auto_confirm"`
+	// AutoConsign 表示自动发货后是否自动转已发货。
+	AutoConsign bool `json:"auto_consign"`
 	// Remark 是账号备注。
 	Remark string `json:"remark"`
 	// PauseDuration 是暂停时长，单位为分钟。
@@ -380,6 +382,8 @@ type cookieProfileResponse struct {
 type autoConfirmResponse struct {
 	// AutoConfirm 表示是否自动确认订单。
 	AutoConfirm bool `json:"auto_confirm"`
+	// AutoConsign 表示自动发货后是否自动转已发货。
+	AutoConsign bool `json:"auto_consign"`
 }
 
 // pauseDurationResponse 是账号暂停时长查询接口的具名响应 DTO。

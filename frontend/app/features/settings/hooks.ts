@@ -80,6 +80,10 @@ export const useSettings = (): UseSettingsResult => {
   const requestSequence = useRef(0);
   // requestController 保存当前可取消的设置请求。
   const requestController = useRef<AbortController | null>(null);
+  // credentialsRequestSequence 隔离登录凭据保存的旧响应，不与设置加载或保存共用代次。
+  const credentialsRequestSequence = useRef(0);
+  // credentialsRequestController 保存当前可取消的登录凭据保存请求。
+  const credentialsRequestController = useRef<AbortController | null>(null);
   // modelRequestSequence 隔离模型发现的旧响应，防止其覆盖新配置对应的列表。
   const modelRequestSequence = useRef(0);
   // modelRequestController 保存当前模型发现请求的专属取消控制器。
@@ -97,6 +101,16 @@ export const useSettings = (): UseSettingsResult => {
     requestController.current = controller;
     requestSequence.current += 1;
     return { controller, sequence: requestSequence.current };
+  }, []);
+
+  /** 取消旧的登录凭据保存请求并创建独立的当前请求。 */
+  const beginCredentialsRequest = useCallback(/* 当前回调隔离登录凭据保存的取消和晚到响应。 */ () => {
+    credentialsRequestController.current?.abort();
+    // controller 是本次登录凭据保存的取消控制器。
+    const controller = new AbortController();
+    credentialsRequestController.current = controller;
+    credentialsRequestSequence.current += 1;
+    return { controller, sequence: credentialsRequestSequence.current };
   }, []);
 
   /** 取消旧模型发现并创建当前唯一有效的模型发现请求。 */
@@ -174,7 +188,11 @@ export const useSettings = (): UseSettingsResult => {
 
   useEffect(/* 当前回调同步 React 副作用和资源生命周期。 */ () => {
     loadSettings();
-    return /* 当前回调处理用户交互或异步状态变化。 */ () => { requestController.current?.abort(); cancelModelRequest(); };
+    return /* 当前回调处理用户交互或异步状态变化。 */ () => {
+      requestController.current?.abort();
+      credentialsRequestController.current?.abort();
+      cancelModelRequest();
+    };
   }, [cancelModelRequest, loadSettings]);
 
   useEffect(/* 当前回调同步 React 副作用和资源生命周期。 */ () => {
@@ -222,8 +240,8 @@ export const useSettings = (): UseSettingsResult => {
       setCredentialsMessage(createCredentialsMessage('error', validationError));
       return;
     }
-    // request 是本次凭据保存动作的代次与控制器。
-    const { controller, sequence } = beginRequest();
+    // request 是本次凭据保存动作的专属代次与控制器。
+    const { controller, sequence } = beginCredentialsRequest();
     setCredentialsSaving(true);
     try {
       // result 是后端返回的凭据更新结果。
@@ -232,7 +250,7 @@ export const useSettings = (): UseSettingsResult => {
         new_username: credentials.new_username.trim(),
         new_password: credentials.new_password || undefined,
       }, { signal: controller.signal });
-      if (!isCurrentSettingsRequest(requestSequence.current, sequence, controller.signal)) return;
+      if (!isCurrentSettingsRequest(credentialsRequestSequence.current, sequence, controller.signal)) return;
       if (!result.success) {
         setCredentialsMessage(createCredentialsMessage('error', result.message || '登录凭据更新失败'));
         return;
@@ -240,12 +258,12 @@ export const useSettings = (): UseSettingsResult => {
       setCredentialsMessage(createCredentialsMessage('success', result.message || '登录凭据已更新'));
       window.setTimeout(/* 当前回调处理用户交互或异步状态变化。 */ () => window.location.reload(), 1400);
     } catch (/* error 保存登录凭据提交请求的失败原因；不写入日志或持久化状态。 */ error) {
-      if (!isCurrentSettingsRequest(requestSequence.current, sequence, controller.signal) || isSettingsAbortError(error)) return;
+      if (!isCurrentSettingsRequest(credentialsRequestSequence.current, sequence, controller.signal) || isSettingsAbortError(error)) return;
       setCredentialsMessage(createCredentialsMessage('error', settingsErrorMessage(error, '登录凭据更新失败')));
     } finally {
-      if (isCurrentSettingsRequest(requestSequence.current, sequence, controller.signal)) setCredentialsSaving(false);
+      if (isCurrentSettingsRequest(credentialsRequestSequence.current, sequence, controller.signal)) setCredentialsSaving(false);
     }
-  }, [beginRequest, credentials]);
+  }, [beginCredentialsRequest, credentials]);
 
   return {
     settings, loading, loadError, saving, saveError, aiModels, modelsLoading, modelError, modelDropdownOpen,

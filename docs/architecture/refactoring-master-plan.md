@@ -81,6 +81,8 @@ git diff --check
 
 ## 后续窄范围安全修复记录
 
+- 2026-09-13（发布前审查后续可靠性修复，已完成、本地未发布）：修复一次性默认回复状态写入连续失败后租约到期自动重发、批量发布长间隔等待消耗最终网络超时预算、商品详情探测丢失同步 Cookie 会话三项问题。新领取记录先持久化为不可自动接管的 `sending` 状态；最终发布请求在节流闸门返回后单独创建两分钟网络预算；全量和分页商品详情探测复用列表同步的 CookieSession，并刷新首阶段 Cookie 写回后的并发比较基准。新增 SQLite、MTOP、本地平台替身和同步会话回归测试。`make check`、`make cover`（Go statement 81.4%，未设置 RUN_BROWSER_INTEGRATION）、`make cover-browser`（RUN_BROWSER_INTEGRATION=1，浏览器包 64.2%）、`make cover-frontend`（89 文件 516 测试，statement 78.92%）、前端 typecheck/构建及新增场景定向 race 均通过；受影响包全量 race 因既有 `internal/db.TestOrderOwnershipRecoveryUnsafe` 在 10 分钟迁移压力测试超时未完成。真实账号、外部平台及 MySQL/PostgreSQL 验证未执行。
+
 - 2026-09-12（发布前执行权与分页扩查，已完成、本地未发布）：修复普通自动化及补发在途续租和逐次副作用失权检查、恢复扫描旧快照覆盖新状态、删除后分页状态不同步、首页与追加分页交错、旧删除请求晚到清除新状态及商品发送中切换会话的忙碌状态残留。成功省略 `cardList` 一律按空列表处理，不再用分页或总数元数据否定该协议事实；显式数组类型及分页完整性检查保留。同步修正既有 MySQL 创建时间回归的驱动格式假设，解析后精确比较 UTC 时刻，保留空值和默认时间断言。`go test ./... -count=1`、最终 `make cover`（Go statement 81.4%，未设置 RUN_BROWSER_INTEGRATION）、`make cover-browser`（RUN_BROWSER_INTEGRATION=1，浏览器包 64.1%）、`make cover-frontend`（89 文件 512 测试，statement 78.90%）、完整 SQLite/MySQL 8.4/PostgreSQL 17 `make test-multidb`、自动化/数据库定向 race、新增租约回归重复 5 轮 race、`make test-server-race`、API/架构/comments/vet/lint、前端 typecheck 和构建、Go 构建、实际 Chromium 启动及健康检查和 SIGTERM 收口均通过。新增租约守卫及两项仓储操作 statement 100%。六阶段、HTTP/OpenAPI、数据库 schema、冻结 CAPTCHA 和注释基线不变；真实账号平台投递/发货/风控及各平台发布安装包未执行，详细边界见 [执行权与分页扩查记录](release-execution-state-fix-20260912.md)。
 
 

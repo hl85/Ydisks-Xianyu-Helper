@@ -45,6 +45,7 @@ const AccountList: React.FC = () => {
     remark: '',
     cookie: '',
     auto_confirm: false,
+    auto_consign: false,
     pause_duration: 0,
     username: '',
     login_password: '',

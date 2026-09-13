@@ -64,11 +64,11 @@ func TestAccountSettingsRepositoryWritesAndReadsSettings(t *testing.T) {
 	// remark、password 保存本次设置写入的非敏感备注和敏感密码输入。
 	remark := "新备注"
 	password := "new-password" // password 保存仅用于适配器加密写入的测试秘密。
-	// enabled、showBrowser 保存账号开关设置。
-	enabled, showBrowser := true, false
+	// enabled、autoConsign 和 showBrowser 保存账号自动化及浏览器显示开关。
+	enabled, autoConsign, showBrowser := true, true, false
 	// updateErr 保存账号设置事务写入错误。
 	_, updateErr := repository.UpdateSettings(ctx, accountapp.SettingsUpdateInput{
-		UserID: admin.ID, AccountID: "cid", Remark: &remark, AutoConfirm: &enabled,
+		UserID: admin.ID, AccountID: "cid", Remark: &remark, AutoConfirm: &enabled, AutoConsign: &autoConsign,
 		Username: ptrString("login-user"), Password: &password, ShowBrowser: &showBrowser,
 	})
 	if updateErr != nil {
@@ -78,6 +78,11 @@ func TestAccountSettingsRepositoryWritesAndReadsSettings(t *testing.T) {
 	detail, detailErr := store.Cookies.GetDetails(ctx, "cid")
 	if detailErr != nil || detail.Remark != remark || !detail.AutoConfirm || detail.Username != "login-user" || detail.ShowBrowser {
 		t.Fatalf("settings detail=%+v err=%v", detail, detailErr)
+	}
+	// summary、summaryErr 保存不含敏感字段的账号摘要，用于确认自动确认发货开关已透传。
+	summary, summaryErr := store.Cookies.GetSummaryOwned(ctx, admin.ID, "cid")
+	if summaryErr != nil || !summary.AutoConsign {
+		t.Fatalf("settings summary=%+v err=%v", summary, summaryErr)
 	}
 	// storedPassword 保存数据库中加密后的密码字段，仅用于确认敏感值未以明文落盘。
 	var storedPassword string

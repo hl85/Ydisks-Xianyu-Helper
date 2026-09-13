@@ -13,6 +13,8 @@ type AccountSummary struct {
 	UserID int64
 	// AutoConfirm 表示账号是否启用自动确认收货。
 	AutoConfirm bool
+	// AutoConsign 表示自动发货后是否自动转已发货。
+	AutoConsign bool
 	// Remark 是用户为账号设置的备注。
 	Remark string
 	// PauseDuration 是账号暂停时长，单位为分钟。

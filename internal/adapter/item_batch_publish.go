@@ -105,20 +105,26 @@ func (p *ItemBatchPublishPort) PublishRemoteRow(ctx context.Context, userID int6
 	}
 	// initialValue、initialMetadata 用于远端返回后复核期间的凭证一致性。
 	initialValue, initialMetadata := latest.Value, latest.MetadataJSON
-	// requestCtx、cancel 控制单行远端发布的最长执行时间。
-	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	// requestCtx 承载图片上传、类目准备和最终发布共用的任务取消生命周期；最终网络请求的
+	// 独立超时由 MTOP 客户端在节流闸门返回后创建，避免长间隔等待提前耗尽网络预算。
+	requestCtx := ctx
 	// mtopCtx、cookieSession 挂载本次调用使用的 Cookie 会话。
 	mtopCtx, cookieSession := withCookieSnapshot(requestCtx, latest)
 	// unlock 在远端 I/O 前释放，避免凭证锁覆盖慢速平台请求。
 	unlock()
+	// publishGate 将批次节流绑定到平台客户端传入的任务上下文，保留取消和租约失效信号。
+	var publishGate func(context.Context) error
+	if beforePublish != nil {
+		publishGate = beforePublish
+	}
 	// result、callErr 保存平台返回结果及调用错误。
 	result, callErr := p.mtopClient().PublishItem(mtopCtx, latest.Value, mtop.PublishItemRequest{
 		Title: row.Title, Description: firstBatchNonEmpty(row.Description, row.Title), PriceCents: priceCents,
 		OriginalPriceCents: originalPriceCents, Quantity: row.Quantity, PostageMode: row.PostageMode,
 		PostageCents: postageCents, Virtual: true, Location: location, PreferredCategory: preferredCategory, Images: images,
-		BeforePublish: beforePublish,
+		// BeforePublish 由 MTOP 客户端在图片上传和类目准备完成后、最终发布请求前调用。
+		BeforePublish: publishGate,
 	})
-	cancel()
 	// runtimeCookie、persistErr 保存会话写回后的运行时 Cookie 和错误。
 	runtimeCookie, persistErr := p.persistBatchSession(ctx, userID, row.CookieID, initialValue, initialMetadata, cookieSession, result, callErr)
 	if runtimeCookie != "" && p.updateRunningCookie != nil {

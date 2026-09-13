@@ -154,6 +154,10 @@ func normalizeAPIConfig(raw, existing string) (string, error) {
 	if err := mergeAPISecretField(fields, previous, "params"); err != nil {
 		return "", err
 	}
+	// body 字段也可能携带调用方秘密；普通编辑未提交它时必须保留历史模板。
+	if fields["body"] == nil && previous != nil && previous["body"] != nil {
+		fields["body"] = previous["body"]
+	}
 	delete(fields, "headers_action")
 	delete(fields, "params_action")
 	// timeout 表示历史配置使用的兼容超时字段。

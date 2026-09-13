@@ -62,6 +62,14 @@ func (r *cardRepositoryStub) Update(_ context.Context, card Card) error {
 	return r.updateErr
 }
 
+// UpdateDataMetadata 记录不覆盖库存正文的数据卡元数据更新。
+func (r *cardRepositoryStub) UpdateDataMetadata(_ context.Context, card Card) error {
+	r.updatedCard = card
+	// DataContent 模拟数据库在元数据更新中保留的当前库存正文。
+	r.updatedCard.DataContent = r.card.DataContent
+	return r.updateErr
+}
+
 // Delete 记录待删除卡券标识并返回预设错误。
 func (r *cardRepositoryStub) Delete(_ context.Context, cardID int64) error {
 	r.deletedCardID = cardID
@@ -186,6 +194,12 @@ func TestServiceUpdateAndDeleteOwnership(t *testing.T) {
 	if err := service.Update(context.Background(), 7, 5, Draft{Name: "legacy", Type: "api"}); err != nil {
 		t.Fatalf("既有 API 卡券应允许继续编辑，err=%v", err)
 	}
+	// repository.card 切回文本类型，验证转换为 data 时缺少库存仍会被拒绝。
+	repository.card.Type = "text"
+	// err 表示文本卡转换为 data 且未提供库存时的校验错误。
+	if err := service.Update(context.Background(), 7, 5, Draft{Name: "invalid-data", Type: "data"}); err == nil {
+		t.Fatal("非 data 卡转换为空 data 不应静默成功")
+	}
 	repository.card.UserID = 8
 	// err 表示跨用户删除卡券时的所有权错误。
 	if err := service.Delete(context.Background(), 7, 5); !errors.Is(err, ErrForbidden) || repository.deletedCardID != 0 {
@@ -198,6 +212,31 @@ func TestServiceUpdateAndDeleteOwnership(t *testing.T) {
 	// err 表示删除卡券组时透传的持久化错误。
 	if err := service.Delete(context.Background(), 7, 5); !errors.Is(err, deleteErr) || repository.deletedCardID != 5 {
 		t.Fatalf("删除错误或标识不匹配，deleted=%d err=%v", repository.deletedCardID, err)
+	}
+}
+
+// TestServiceUpdateDataMetadataRetainsStock 验证仅更新 data 卡元数据时不会覆盖并发消费后的库存。
+func TestServiceUpdateDataMetadataRetainsStock(t *testing.T) {
+	// repository 保存模拟自动化已消费一行之后的当前完整卡券。
+	repository := &cardRepositoryStub{card: Card{ID: 18, UserID: 7, Name: "库存卡", Type: "data", DataContent: "未消费行", Enabled: true, IsMultiSpec: true, SpecName: "套餐", SpecValue: "年度"}}
+	// service 是使用可观测仓储的卡券应用服务。
+	service := NewService(repository)
+	// draft 只携带页面启停动作的元数据，不携带可能过期的库存正文。
+	draft := Draft{Name: "库存卡", Type: "data", Enabled: false}
+	// updateErr 保存元数据更新执行结果。
+	updateErr := service.Update(context.Background(), 7, 18, draft)
+	if updateErr != nil || repository.updatedCard.DataContent != "未消费行" || repository.updatedCard.Enabled || !repository.updatedCard.IsMultiSpec || repository.updatedCard.SpecName != "套餐" || repository.updatedCard.SpecValue != "年度" {
+		t.Fatalf("元数据更新覆盖库存 updated=%+v err=%v", repository.updatedCard, updateErr)
+	}
+	// explicitEmptyErr 保存用户明确清空库存时的校验结果，不能被误当成省略库存字段。
+	explicitEmptyErr := service.Update(context.Background(), 7, 18, Draft{Name: "库存卡", Type: "data", Enabled: true, DataContentSet: true})
+	if explicitEmptyErr == nil {
+		t.Fatal("显式空库存不应被当作元数据更新而静默保留")
+	}
+	// explicitContentErr 验证替换库存正文时未提交的规格字段仍保持原匹配条件。
+	explicitContentErr := service.Update(context.Background(), 7, 18, Draft{Name: "库存卡", Type: "data", Enabled: true, DataContent: "新库存", DataContentSet: true})
+	if explicitContentErr != nil || repository.updatedCard.IsMultiSpec != true || repository.updatedCard.SpecName != "套餐" || repository.updatedCard.SpecValue != "年度" {
+		t.Fatalf("替换库存时规格条件被清空 updated=%+v err=%v", repository.updatedCard, explicitContentErr)
 	}
 }
 

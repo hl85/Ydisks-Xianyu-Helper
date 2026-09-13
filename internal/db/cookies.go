@@ -31,6 +31,7 @@ type AccountSettingsUpdate struct {
 	Value         *string
 	Remark        *string
 	AutoConfirm   *bool
+	AutoConsign   *bool
 	PauseDuration *int
 	Username      *string
 	Password      *string
@@ -93,6 +94,10 @@ func (c *Cookies) UpdateSettings(ctx context.Context, cookieID string, input Acc
 	if input.AutoConfirm != nil {
 		assignments = append(assignments, "auto_confirm=?")
 		args = append(args, boolToInt(*input.AutoConfirm))
+	}
+	if input.AutoConsign != nil {
+		assignments = append(assignments, "auto_consign=?")
+		args = append(args, boolToInt(*input.AutoConsign))
 	}
 	// pausedUntil 用于本次流程后续判断的pausedUntil
 	pausedUntil := int64(0)
@@ -590,6 +595,21 @@ func (c *Cookies) GetAutoConfirm(ctx context.Context, cookieID string) (bool, er
 	var enabled int
 	// err 用于本次流程后续判断的err
 	err := c.DB.QueryRowContext(ctx, `SELECT auto_confirm FROM cookies WHERE id=?`, cookieID).Scan(&enabled)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrNotFound
+		}
+		return false, err
+	}
+	return enabled != 0, nil
+}
+
+// GetAutoConsign 读取账号在自动发货后是否自动调用平台确认发货（转已发货）。
+func (c *Cookies) GetAutoConsign(ctx context.Context, cookieID string) (bool, error) {
+	// enabled 用于本次流程后续判断的启用状态
+	var enabled int
+	// err 用于本次流程后续判断的err
+	err := c.DB.QueryRowContext(ctx, `SELECT auto_consign FROM cookies WHERE id=?`, cookieID).Scan(&enabled)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, ErrNotFound

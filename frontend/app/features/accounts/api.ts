@@ -65,6 +65,7 @@ export const getAccountDetails = async (options?: RequestControlOptions): Promis
     cookie_configured: item.has_cookie === true,
     enabled: item.enabled,
     auto_confirm: item.auto_confirm,
+    auto_consign: item.auto_consign === true,
     remark: item.remark,
     pause_duration: item.pause_duration,
     paused_until: Number(item.paused_until || 0),
@@ -208,7 +209,8 @@ export const updateAccountCookie = async (id: string, value: string, loginMethod
 export interface AccountSettingsUpdate {
   /** cookie 表示登录凭证。 */ cookie?: string;
   /** remark 表示备注。 */ remark?: string;
-  /** auto_confirm 表示自动确认状态。 */ auto_confirm?: boolean;
+  /** auto_confirm 表示自动发货状态。 */ auto_confirm?: boolean;
+  /** auto_consign 表示自动发货后是否自动转已发货。 */ auto_consign?: boolean;
   /** pause_duration 表示暂停时长。 */ pause_duration?: number;
   /** username 表示用户名。 */ username?: string;
   /** login_password 表示登录密码。 */ login_password?: string;

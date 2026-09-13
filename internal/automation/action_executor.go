@@ -171,8 +171,8 @@ func (e *automationActionExecutor) confirmShipmentWithProof(ctx context.Context,
 	if task.OrderID == "" {
 		return fmt.Errorf("确认发货缺少订单ID")
 	}
-	// enabled 表示账号是否打开自动确认发货设置；readErr 表示读取该账号设置时的数据库错误。
-	enabled, readErr := e.store.Cookies.GetAutoConfirm(ctx, task.AccountID)
+	// enabled 表示账号是否打开自动确认发货（转已发货）设置；readErr 表示读取该账号设置时的数据库错误。
+	enabled, readErr := e.store.Cookies.GetAutoConsign(ctx, task.AccountID)
 	if readErr != nil {
 		return fmt.Errorf("读取自动确认发货设置: %w", readErr)
 	}

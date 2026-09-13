@@ -109,6 +109,71 @@ func TestCardsRepositoryAppendDataMapping(t *testing.T) {
 	}
 }
 
+// TestCardsRepositorySummaryPreservesContentType 验证脱敏 API 摘要仍保留公开请求编码类型。
+func TestCardsRepositorySummaryPreservesContentType(t *testing.T) {
+	// store、cleanup 保存临时 SQLite 数据库和关闭责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// repository 是待测卡券适配器。
+	repository := NewCardsRepository(store)
+	// ctx 是本地 SQLite 读写使用的无截止上下文。
+	ctx := context.Background()
+	// owner、ownerErr 保存创建 API 卡券需要的本地用户身份及查询错误。
+	owner, ownerErr := store.Users.GetByUsername(ctx, "admin")
+	if ownerErr != nil {
+		t.Fatal(ownerErr)
+	}
+	// cardID、createErr 保存带表单编码配置的 API 卡券创建结果。
+	cardID, createErr := repository.Create(ctx, cardsapp.Card{
+		Name: "表单 API", Type: "api", UserID: owner.ID,
+		APIConfig: `{"url":"https://example.invalid/card","method":"POST","content_type":"application/x-www-form-urlencoded"}`,
+	})
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	// card、getErr 保存脱敏读取结果及错误。
+	card, getErr := repository.Get(ctx, cardID)
+	if getErr != nil || card.APIConfigSummary == nil || card.APIConfigSummary.ContentType != "application/x-www-form-urlencoded" {
+		t.Fatalf("API 摘要丢失 Content-Type card=%+v err=%v", card, getErr)
+	}
+}
+
+// TestCardsRepositoryDataMetadataPreservesConsumedStock 验证元数据更新不会恢复已经并发消费的库存正文。
+func TestCardsRepositoryDataMetadataPreservesConsumedStock(t *testing.T) {
+	// store、cleanup 管理隔离数据库及关闭责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// ctx 是本地 SQLite 读写使用的上下文。
+	ctx := context.Background()
+	// owner、ownerErr 保存测试卡券所属用户。
+	owner, ownerErr := store.Users.GetByUsername(ctx, "admin")
+	if ownerErr != nil {
+		t.Fatal(ownerErr)
+	}
+	// repository 是待测卡券数据库适配器。
+	repository := NewCardsRepository(store)
+	// cardID、createErr 保存带两条库存的 data 卡券。
+	cardID, createErr := repository.Create(ctx, cardsapp.Card{Name: "库存", Type: "data", DataContent: "A\nB", Enabled: true, UserID: owner.ID})
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	// consumed、consumeErr 模拟自动发货先消费第一条库存。
+	consumed, consumeErr := store.Cards.ConsumeBatchData(ctx, cardID)
+	if consumeErr != nil || consumed != "A" {
+		t.Fatalf("消费库存失败 consumed=%q err=%v", consumed, consumeErr)
+	}
+	// updateErr 执行只更新元数据的 SQL，不能覆盖当前剩余库存。
+	updateErr := repository.UpdateDataMetadata(ctx, cardsapp.Card{ID: cardID, Name: "库存改名", Type: "data", Enabled: false, UserID: owner.ID})
+	if updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	// updated、updatedErr 验证消费后的库存仍只有第二条。
+	updated, updatedErr := repository.GetFull(ctx, cardID)
+	if updatedErr != nil || updated.DataContent != "B" || updated.Name != "库存改名" || updated.Enabled {
+		t.Fatalf("元数据更新覆盖消费库存 updated=%+v err=%v", updated, updatedErr)
+	}
+}
+
 // TestCardsRepositoryPropagatesInfrastructureErrors 验证数据库不可用时不会伪装成卡券缺失。
 func TestCardsRepositoryPropagatesInfrastructureErrors(t *testing.T) {
 	// store 是随后主动关闭数据库连接的测试存储。

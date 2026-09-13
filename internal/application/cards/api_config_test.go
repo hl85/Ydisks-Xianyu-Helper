@@ -54,6 +54,22 @@ func TestNormalizeAPIConfigThreeStateAndNullGuard(t *testing.T) {
 	}
 }
 
+// TestNormalizeAPIConfigRetainsUnsubmittedBody 验证普通编辑不会清空脱敏后未回传的请求正文。
+func TestNormalizeAPIConfigRetainsUnsubmittedBody(t *testing.T) {
+	// existing 保存包含请求正文的完整历史配置；正文只在服务端短暂比较。
+	existing := `{"url":"https://example.com","method":"POST","body":{"sku":"private-stock"},"content_type":"application/x-www-form-urlencoded"}`
+	// normalized、normalizeErr 保存普通编辑归一化后的配置及错误。
+	normalized, normalizeErr := normalizeAPIConfig(`{"url":"https://example.com","method":"POST","content_type":"application/x-www-form-urlencoded"}`, existing)
+	if normalizeErr != nil {
+		t.Fatalf("普通编辑归一化失败: %v", normalizeErr)
+	}
+	// document、parseErr 保存执行配置，用于仅验证正文仍被保留。
+	document, parseErr := ParseAPIConfig(normalized)
+	if parseErr != nil || document.Body["sku"] != "private-stock" {
+		t.Fatalf("普通编辑丢失请求正文 document=%+v err=%v", document, parseErr)
+	}
+}
+
 // containsJSONEmptyObject 判断规范 JSON 中指定模板是否为显式空对象。
 func containsJSONEmptyObject(raw, key string) bool {
 	// fields 保存规范 JSON 对象，测试只检查模板是否为空而不输出秘密值。

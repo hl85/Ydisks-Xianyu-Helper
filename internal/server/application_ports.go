@@ -184,6 +184,7 @@ type AccountSettingsPort interface {
 	UpdateLoginInfo(context.Context, accountapp.LoginInfoUpdateInput) error
 	SetStatus(context.Context, int64, string, bool) (accountapp.StatusResult, error)
 	SetAutoConfirm(context.Context, int64, string, bool) (accountapp.SettingsResult, error)
+	SetAutoConsign(context.Context, int64, string, bool) (accountapp.SettingsResult, error)
 	SetRemark(context.Context, int64, string, string) (accountapp.SettingsResult, error)
 	SetPause(context.Context, int64, string, int) (accountapp.SettingsResult, error)
 	GetPause(context.Context, int64, string) (accountapp.PauseState, error)

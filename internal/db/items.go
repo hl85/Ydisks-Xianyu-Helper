@@ -227,6 +227,60 @@ func (i *Items) SyncFromRemote(ctx context.Context, cookieID string, rows []Item
 	return ItemSyncResult{Saved: len(validRows), Deleted: int(deleted)}, nil
 }
 
+// SavePageFromRemote 在一个事务内保存远端分页商品，确保基础字段和多规格标记不会部分成功。
+func (i *Items) SavePageFromRemote(ctx context.Context, cookieID string, rows []ItemInfoRow) (int, error) {
+	cookieID = strings.TrimSpace(cookieID)
+	if cookieID == "" {
+		return 0, errors.New("cookie_id 不能为空")
+	}
+	// remoteIDs、validRows 保存去重且具有有效商品 ID 的远端分页记录。
+	remoteIDs := make(map[string]struct{}, len(rows))
+	// validRows 保存过滤空 ID 和重复 ID 后的分页商品。
+	validRows := make([]ItemInfoRow, 0, len(rows))
+	// row 表示当前待规范化的远端分页商品记录。
+	for _, row := range rows {
+		row.CookieID = cookieID
+		row.ItemID = strings.TrimSpace(row.ItemID)
+		if row.ItemID == "" {
+			continue
+		}
+		// exists 表示当前商品 ID 是否已经在本页出现过。
+		if _, exists := remoteIDs[row.ItemID]; exists {
+			continue
+		}
+		remoteIDs[row.ItemID] = struct{}{}
+		validRows = append(validRows, row)
+	}
+	// tx、err 保存本页商品原子写入使用的事务及初始化错误。
+	tx, err := i.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	// rollback 统一回滚失败事务并保留原始数据库错误。
+	rollback := func(err error) (int, error) {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	// index 表示当前事务中待写入的规范化商品下标。
+	for index := range validRows {
+		// err 保存当前商品基础字段事务写入错误。
+		if err := i.UpsertBasicTx(ctx, tx, &validRows[index]); err != nil {
+			return rollback(err)
+		}
+		// err 保存当前商品多规格标记事务写入错误。
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE item_info SET is_multi_spec=?, updated_at=CURRENT_TIMESTAMP WHERE cookie_id=? AND item_id=?`,
+			boolToInt(validRows[index].IsMultiSpec), cookieID, validRows[index].ItemID); err != nil {
+			return rollback(err)
+		}
+	}
+	// err 保存本页商品事务提交错误。
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(validRows), nil
+}
+
 // upsertBasic 封装upsertBasic业务协调。
 func (i *Items) upsertBasic(ctx context.Context, execer sqlExecer, r *ItemInfoRow) error {
 	// 三种数据库的条件 upsert：非空才覆盖，空值保留旧值。

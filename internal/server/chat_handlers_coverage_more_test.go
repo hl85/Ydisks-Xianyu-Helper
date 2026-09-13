@@ -72,6 +72,8 @@ type cookieSettingsCoveragePort struct {
 	// updateSettingsResult 与 updateSettingsErr 保存账号设置更新结果。
 	updateSettingsResult accountapp.SettingsResult
 	updateSettingsErr    error
+	// updateSettingsInput 保存最近一次账号设置请求，验证多个开关由同一应用服务调用提交。
+	updateSettingsInput accountapp.SettingsUpdateInput
 	// loginInfoErr 保存登录资料更新错误。
 	loginInfoErr error
 	// statusResult 与 statusErr 保存账号启停结果。
@@ -110,8 +112,9 @@ func (port *cookieLoginCoveragePort) UpdateCookie(context.Context, string, strin
 	return port.updateErr
 }
 
-// UpdateSettings 返回测试配置的账号设置更新结果。
-func (port *cookieSettingsCoveragePort) UpdateSettings(context.Context, accountapp.SettingsUpdateInput) (accountapp.SettingsResult, error) {
+// UpdateSettings 返回测试配置的账号设置更新结果，并记录本次输入以验证事务边界。
+func (port *cookieSettingsCoveragePort) UpdateSettings(_ context.Context, input accountapp.SettingsUpdateInput) (accountapp.SettingsResult, error) {
+	port.updateSettingsInput = input
 	return port.updateSettingsResult, port.updateSettingsErr
 }
 
@@ -738,7 +741,7 @@ func TestCookieSettingsHandlersCoverStatusUpdateAndValidation(t *testing.T) {
 		body   string
 	}{
 		{http.MethodPut, "/api/v1/cookies/acc1/status", `{"enabled":true}`},
-		{http.MethodPut, "/api/v1/cookies/acc1/auto-confirm", `{"auto_confirm":true}`},
+		{http.MethodPut, "/api/v1/cookies/acc1/auto-confirm", `{"auto_confirm":true,"auto_consign":false}`},
 		{http.MethodPut, "/api/v1/cookies/acc1/remark", `{"remark":"备注"}`},
 		{http.MethodPut, "/api/v1/cookies/acc1/pause-duration", `{"pause_duration":30}`},
 		{http.MethodGet, "/api/v1/cookies/acc1/pause-duration", ""},
@@ -751,6 +754,14 @@ func TestCookieSettingsHandlersCoverStatusUpdateAndValidation(t *testing.T) {
 		recorder := serveChatCoverageRequest(handler, cookie, successCase.method, successCase.path, successCase.body)
 		if recorder.Code != http.StatusOK {
 			t.Errorf("%s %s status=%d body=%s", successCase.method, successCase.path, recorder.Code, recorder.Body.String())
+		}
+		if successCase.path == "/api/v1/cookies/acc1/auto-confirm" {
+			if port.updateSettingsInput.AutoConfirm == nil || !*port.updateSettingsInput.AutoConfirm {
+				t.Fatal("自动发货开关应通过聚合设置提交")
+			}
+			if port.updateSettingsInput.AutoConsign == nil || *port.updateSettingsInput.AutoConsign {
+				t.Fatal("自动确认发货开关应与自动发货开关一并提交")
+			}
 		}
 	}
 
@@ -839,19 +850,19 @@ func TestCookieSettingsHandlersCoverStatusUpdateAndValidation(t *testing.T) {
 		}
 	}
 
-	port.autoConfirmErr = accountapp.ErrForbidden
+	port.updateSettingsErr = accountapp.ErrForbidden
 	// autoConfirmErrorRecorder 保存自动确认无权错误响应。
 	autoConfirmErrorRecorder := serveChatCoverageRequest(handler, cookie, http.MethodPut, "/api/v1/cookies/acc1/auto-confirm", `{"auto_confirm":true}`)
 	if autoConfirmErrorRecorder.Code != http.StatusForbidden {
 		t.Fatalf("auto confirm status=%d", autoConfirmErrorRecorder.Code)
 	}
-	port.autoConfirmErr = errors.New("auto confirm failed")
+	port.updateSettingsErr = errors.New("auto confirm failed")
 	// autoConfirmInternalRecorder 保存自动确认内部错误响应。
 	autoConfirmInternalRecorder := serveChatCoverageRequest(handler, cookie, http.MethodPut, "/api/v1/cookies/acc1/auto-confirm", `{"auto_confirm":true}`)
 	if autoConfirmInternalRecorder.Code != http.StatusInternalServerError {
 		t.Fatalf("auto confirm internal status=%d", autoConfirmInternalRecorder.Code)
 	}
-	port.autoConfirmErr = nil
+	port.updateSettingsErr = nil
 	port.remarkErr = accountapp.ErrNotFound
 	// remarkErrorRecorder 保存备注账号不存在响应。
 	remarkErrorRecorder := serveChatCoverageRequest(handler, cookie, http.MethodPut, "/api/v1/cookies/acc1/remark", `{"remark":"x"}`)

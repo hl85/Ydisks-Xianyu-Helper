@@ -7,8 +7,10 @@ export interface AccountEditForm {
   remark: string;
   // cookie 是手工维护的授权 Cookie。
   cookie: string;
-  // auto_confirm 表示是否自动确认发货。
+  // auto_confirm 表示是否自动发货（付款后发卡密/模板消息）。
   auto_confirm: boolean;
+  // auto_consign 表示自动发货后是否自动确认发货（转已发货）。
+  auto_consign: boolean;
   // pause_duration 是账号订单处理暂停时长，单位为分钟。
   pause_duration: number;
   // username 是用于密码登录的闲鱼账号。

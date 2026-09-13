@@ -26,6 +26,8 @@ type Summary struct {
 	AvatarURL string
 	// AutoConfirm 表示账号是否启用自动确认收货。
 	AutoConfirm bool
+	// AutoConsign 表示自动发货后是否自动转已发货。
+	AutoConsign bool
 	// PauseDuration 是账号暂停时长，单位为分钟。
 	PauseDuration int
 	// PausedUntil 是暂停结束时间的 Unix 秒；零值表示当前未暂停。

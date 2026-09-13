@@ -125,7 +125,7 @@ export const useAccountSubmodules = ({ editingAccount, setEditingAccount, setAct
     setPasswordLoginView({ sessionId: '', status: 'idle', message: '', qrCodeUrl: '' });
     setEditingAccount(account);
     // 摘要接口不会返回 Cookie 或密码明文；编辑表单只接收本次用户主动输入的秘密。
-    setEditForm({ remark: account.remark || '', cookie: '', auto_confirm: account.auto_confirm || false, pause_duration: account.pause_duration || 0, username: account.username || '', login_password: '', show_browser: account.show_browser || false, showLoginPassword: false, clear_password: false });
+    setEditForm({ remark: account.remark || '', cookie: '', auto_confirm: account.auto_confirm || false, auto_consign: account.auto_consign || false, pause_duration: account.pause_duration || 0, username: account.username || '', login_password: '', show_browser: account.show_browser || false, showLoginPassword: false, clear_password: false });
     setActiveModal('edit');
     setLongLogin({ loading: true, saving: false, canOpen: false, enabled: false, error: '' });
     // longLoginResult 保存长登录设置读取结果。
@@ -204,6 +204,7 @@ export const useAccountSubmodules = ({ editingAccount, setEditingAccount, setAct
       // 编辑表单中的 Cookie 只有用户本次输入时才会提交，避免从账号摘要读取或回填明文。
       if (editForm.cookie) payload.cookie = editForm.cookie;
       if (editForm.auto_confirm !== editingAccount.auto_confirm) payload.auto_confirm = editForm.auto_confirm;
+      if (editForm.auto_consign !== (editingAccount.auto_consign || false)) payload.auto_consign = editForm.auto_consign;
       if (shouldUpdateAccountPause(editForm.pause_duration, editingAccount)) payload.pause_duration = editForm.pause_duration;
       // loginInfo 保存登录字段变更补丁。
       const loginInfo = buildAccountLoginInfoUpdate(editingAccount, editForm);

@@ -7,8 +7,10 @@ export interface AccountDetail {
   cookie_configured?: boolean;
   /** 账号是否允许运行。 */
   enabled: boolean;
-  /** 是否自动确认订单。 */
+  /** 是否自动发货（付款后发卡密/模板消息）。 */
   auto_confirm: boolean;
+  /** 自动发货后是否自动转已发货。 */
+  auto_consign: boolean;
   /** 用户为账号设置的备注。 */
   remark?: string;
   /** 自动回复暂停时长，单位为分钟。 */
@@ -173,6 +175,8 @@ export interface AccountSummaryResponse {
   enabled: boolean;
   /** 是否自动确认订单。 */
   auto_confirm: boolean;
+  /** 自动发货后是否自动转已发货。 */
+  auto_consign: boolean;
   /** 账号备注。 */
   remark: string;
   /** 自动回复暂停时长，单位为分钟。 */

@@ -8054,7 +8054,7 @@ components:
           type: string
     AccountDetailResponse:
       type: object
-      required: [id, has_cookie, enabled, auto_confirm, remark, pause_duration, paused_until, paused, show_browser, username, nickname, avatar_url, login_method, last_login_at, profile_error, auto_rate_enabled, rate_content, auto_polish_enabled, polish_time, last_rate_scan_at, last_polish_date, last_polish_at]
+      required: [id, has_cookie, enabled, auto_confirm, auto_consign, remark, pause_duration, paused_until, paused, show_browser, username, nickname, avatar_url, login_method, last_login_at, profile_error, auto_rate_enabled, rate_content, auto_polish_enabled, polish_time, last_rate_scan_at, last_polish_date, last_polish_at]
       properties:
         id:
           type: string
@@ -8063,6 +8063,8 @@ components:
         enabled:
           type: boolean
         auto_confirm:
+          type: boolean
+        auto_consign:
           type: boolean
         remark:
           type: string
@@ -8119,6 +8121,8 @@ components:
           type: string
         auto_confirm:
           type: boolean
+        auto_consign:
+          type: boolean
         pause_duration:
           type: integer
           minimum: 0
@@ -8166,11 +8170,16 @@ components:
       properties:
         auto_confirm:
           type: boolean
+        auto_consign:
+          type: boolean
+          description: 自动发货后是否自动确认发货（转已发货）；省略时保持不变
     AutoConfirmResponse:
       type: object
-      required: [auto_confirm]
+      required: [auto_confirm, auto_consign]
       properties:
         auto_confirm:
+          type: boolean
+        auto_consign:
           type: boolean
     AccountRemarkRequest:
       type: object

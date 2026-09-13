@@ -49,7 +49,7 @@ func (r *AccountSettingsRepository) UpdateSettings(ctx context.Context, input ac
 	// databaseInput 只在适配器边界携带数据库模型，避免上层依赖 internal/db。
 	databaseInput := db.AccountSettingsUpdate{
 		UserID: input.UserID, Value: input.Cookie, Remark: input.Remark,
-		AutoConfirm: input.AutoConfirm, PauseDuration: input.PauseDuration,
+		AutoConfirm: input.AutoConfirm, AutoConsign: input.AutoConsign, PauseDuration: input.PauseDuration,
 		Username: input.Username, Password: input.Password,
 		ShowBrowser: input.ShowBrowser, ChannelIDs: input.ChannelIDs,
 	}

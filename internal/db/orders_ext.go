@@ -540,6 +540,13 @@ func (c *Cards) Update(ctx context.Context, cf *CardFull) error {
 	return err
 }
 
+// UpdateDataMetadata 只更新 data 卡券的元数据，避免覆盖自动发货并发消费后的库存正文。
+func (c *Cards) UpdateDataMetadata(ctx context.Context, cf *CardFull) error {
+	// err 保存元数据更新的数据库错误。
+	_, err := c.DB.ExecContext(ctx, `UPDATE cards SET name=?,type=?,description=?,enabled=?,delay_seconds=?,is_multi_spec=?,spec_name=?,spec_value=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND type='data'`, cf.Name, cf.Type, nullable(cf.Description), boolToInt(cf.Enabled), cf.DelaySeconds, boolToInt(cf.IsMultiSpec), nullable(cf.SpecName), nullable(cf.SpecValue), cf.ID)
+	return err
+}
+
 // encryptAPIConfig 仅对 API 卡券的完整请求模板做静态加密，其他卡券类型保持原有存储语义。
 func (c *Cards) encryptAPIConfig(cardType string, userID int64, value string) (string, error) {
 	if strings.ToLower(strings.TrimSpace(cardType)) != "api" || strings.TrimSpace(value) == "" {

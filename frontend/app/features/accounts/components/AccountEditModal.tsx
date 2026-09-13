@@ -44,8 +44,10 @@ export const AccountEditModal: React.FC<AccountEditModalProps> = ({
   const handleRemarkChange = (event: React.ChangeEvent<HTMLInputElement>) => updateField('remark', event.target.value);
   // handleCookieChange 更新账号 Cookie 字段。
   const handleCookieChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => updateField('cookie', event.target.value);
-  // handleAutoConfirmToggle 切换自动确认发货设置。
+  // handleAutoConfirmToggle 切换自动发货设置。
   const handleAutoConfirmToggle = () => updateField('auto_confirm', !editForm.auto_confirm);
+  // handleAutoConsignToggle 切换自动确认发货（转已发货）设置。
+  const handleAutoConsignToggle = () => updateField('auto_consign', !editForm.auto_consign);
   // handlePauseDurationChange 更新账号暂停时长。
   const handlePauseDurationChange = (event: React.ChangeEvent<HTMLInputElement>) => updateField('pause_duration', parseInt(event.target.value, 10) || 0);
   // handleRestartPause 按当前时长立即重新暂停账号。
@@ -147,8 +149,8 @@ export const AccountEditModal: React.FC<AccountEditModalProps> = ({
 
           <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
             <div>
-              <div className="font-bold text-gray-900 flex items-center gap-2"><Check className="w-4 h-4 text-green-500" />自动确认发货</div>
-              <div className="text-xs text-gray-500">自动将闲鱼订单标记为已发货</div>
+              <div className="font-bold text-gray-900 flex items-center gap-2"><Check className="w-4 h-4 text-green-500" />自动发货</div>
+              <div className="text-xs text-gray-500">买家付款后自动发送卡密/模板消息（自动化总开关）</div>
             </div>
             <button
               type="button"
@@ -156,6 +158,20 @@ export const AccountEditModal: React.FC<AccountEditModalProps> = ({
               className={`w-14 h-8 rounded-full transition-colors duration-300 relative ${editForm.auto_confirm ? 'bg-brand' : 'bg-gray-300'}`}
             >
               <span className={`absolute left-1 top-1 w-6 h-6 bg-white rounded-full shadow-md transition-transform duration-300 ${editForm.auto_confirm ? 'translate-x-6' : 'translate-x-0'}`} />
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
+            <div>
+              <div className="font-bold text-gray-900 flex items-center gap-2"><Check className="w-4 h-4 text-green-500" />自动确认发货</div>
+              <div className="text-xs text-gray-500">发完卡密后自动调闲鱼"已发货"接口；慢充业务建议关闭，避免触发买家自动收货倒计时</div>
+            </div>
+            <button
+              type="button"
+              onClick={handleAutoConsignToggle}
+              className={`w-14 h-8 rounded-full transition-colors duration-300 relative ${editForm.auto_consign ? 'bg-brand' : 'bg-gray-300'}`}
+            >
+              <span className={`absolute left-1 top-1 w-6 h-6 bg-white rounded-full shadow-md transition-transform duration-300 ${editForm.auto_consign ? 'translate-x-6' : 'translate-x-0'}`} />
             </button>
           </div>
 

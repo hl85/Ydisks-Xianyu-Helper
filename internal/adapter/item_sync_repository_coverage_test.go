@@ -169,3 +169,28 @@ func TestItemSyncCredentialHelpers(t *testing.T) {
 		t.Fatal("完整 Cookie 会话构造失败")
 	}
 }
+
+// TestItemSyncClearsStaleMultiSpecFlag 验证平台返回单规格时会清除本地历史多规格标记。
+func TestItemSyncClearsStaleMultiSpecFlag(t *testing.T) {
+	// store、cleanup 管理隔离数据库及关闭责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// ctx 是商品标记读写共用的上下文。
+	ctx := context.Background()
+	// seedErr 写入一个历史多规格商品。
+	if seedErr := store.Items.Upsert(ctx, &db.ItemInfoRow{CookieID: "cid", ItemID: "item", IsMultiSpec: true}); seedErr != nil {
+		t.Fatal(seedErr)
+	}
+	// repository 使用默认平台客户端，仅测试本地标记写回。
+	repository := NewItemSyncRepository(store, nil, nil, nil, nil)
+	// saved 保存单规格平台结果写回的商品数量。
+	saved, saveErr := repository.saveItems(ctx, "cid", []mtop.ItemListItem{{ID: "item", IsMultiSpec: false}})
+	if saveErr != nil || saved != 1 {
+		t.Fatalf("商品保存数量异常 saved=%d err=%v", saved, saveErr)
+	}
+	// item、itemErr 保存写回后的商品标记。
+	item, itemErr := store.Items.Get(ctx, "cid", "item")
+	if itemErr != nil || item.IsMultiSpec {
+		t.Fatalf("单规格商品仍保留多规格标记 item=%+v err=%v", item, itemErr)
+	}
+}

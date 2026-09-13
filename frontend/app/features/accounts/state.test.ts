@@ -12,6 +12,7 @@ const account = (overrides: Partial<AccountDetail> = {}): AccountDetail => ({
   id: 'account-1',
   enabled: true,
   auto_confirm: false,
+  auto_consign: false,
   username: 'old-user',
   show_browser: false,
   pause_duration: 60,

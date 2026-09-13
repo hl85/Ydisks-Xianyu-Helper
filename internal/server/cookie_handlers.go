@@ -115,6 +115,7 @@ type updateCookieSettingsRequest struct {
 	Cookie        *string  `json:"cookie"`
 	Remark        *string  `json:"remark"`
 	AutoConfirm   *bool    `json:"auto_confirm"`
+	AutoConsign   *bool    `json:"auto_consign"`
 	PauseDuration *int     `json:"pause_duration"`
 	Username      *string  `json:"username"`
 	LoginPassword *string  `json:"login_password"`
@@ -159,10 +160,12 @@ type cookieStatusRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
-// cookieAutoConfirmRequest 是更新自动确认发货开关的 HTTP 请求 DTO。
+// cookieAutoConfirmRequest 是更新自动发货/自动确认发货开关的 HTTP 请求 DTO。
 type cookieAutoConfirmRequest struct {
-	// AutoConfirm 表示是否允许系统自动确认发货。
+	// AutoConfirm 表示是否允许系统自动发货（付款后发卡密/模板消息）。
 	AutoConfirm bool `json:"auto_confirm"`
+	// AutoConsign 表示自动发货后是否自动确认发货（转已发货）。
+	AutoConsign *bool `json:"auto_consign"`
 }
 
 // cookieRemarkRequest 是更新账号备注的 HTTP 请求 DTO。
@@ -223,7 +226,7 @@ func (s *Server) updateCookieSettings(w http.ResponseWriter, r *http.Request) {
 	// settingsResult、err 保存应用服务返回的暂停截止时间、补偿错误和主写入错误。
 	settingsResult, err := s.accountSettingsApplication().UpdateSettings(r.Context(), accountapp.SettingsUpdateInput{
 		UserID: ownedDetail.UserID, AccountID: cid, Cookie: req.Cookie, Remark: req.Remark,
-		AutoConfirm: req.AutoConfirm, PauseDuration: req.PauseDuration, Username: req.Username,
+		AutoConfirm: req.AutoConfirm, AutoConsign: req.AutoConsign, PauseDuration: req.PauseDuration, Username: req.Username,
 		Password: password, ShowBrowser: req.ShowBrowser, ChannelIDs: req.ChannelIDs,
 	})
 	if err != nil {
@@ -290,6 +293,7 @@ func (s *Server) listCookieDetails(w http.ResponseWriter, r *http.Request) {
 			HasCookie:         true,
 			Enabled:           statusErr == nil && enabled,
 			AutoConfirm:       summary.AutoConfirm,
+			AutoConsign:       summary.AutoConsign,
 			Remark:            summary.Remark,
 			PauseDuration:     summary.PauseDuration,
 			PausedUntil:       summary.PausedUntil,
@@ -337,7 +341,8 @@ func (s *Server) getCookieDetails(w http.ResponseWriter, r *http.Request) {
 	enabled, statusErr := s.accountSummaryApplication().StatusOwned(r.Context(), sess.UserID, cid)
 	writeJSON(w, http.StatusOK, cookieDetailResponse{
 		ID: summary.ID, Enabled: statusErr == nil && enabled, AutoConfirm: summary.AutoConfirm,
-		Remark: summary.Remark, PauseDuration: summary.PauseDuration, PausedUntil: summary.PausedUntil,
+		AutoConsign: summary.AutoConsign,
+		Remark:      summary.Remark, PauseDuration: summary.PauseDuration, PausedUntil: summary.PausedUntil,
 		Paused: summary.PausedUntil > time.Now().UTC().Unix(), ShowBrowser: summary.ShowBrowser,
 		Username: summary.Username, Nickname: cachedCookieSummaryNickname(summary), AvatarURL: summary.AvatarURL,
 		LoginMethod: summary.LoginMethod, LastLoginAt: summary.LastLoginAt, ProfileError: "", HasCookie: true,
@@ -601,7 +606,7 @@ func (s *Server) deleteCookie(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, operationResponse{Success: true})
 }
 
-// setCookieAutoConfirm 设置自动确认发货。
+// setCookieAutoConfirm 原子更新自动发货总开关和自动确认发货开关。
 func (s *Server) setCookieAutoConfirm(w http.ResponseWriter, r *http.Request) {
 	// cid 用于本次流程后续判断的cid
 	cid := chi.URLParam(r, "cid")
@@ -617,8 +622,12 @@ func (s *Server) setCookieAutoConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	// sess 是当前请求的认证会话，用于让应用服务再次确认账号归属。
 	sess := authSess(r)
-	if // err 保存应用层自动确认设置错误。
-	_, err := s.accountSettingsApplication().SetAutoConfirm(r.Context(), sess.UserID, cid, req.AutoConfirm); err != nil {
+	// autoConfirm 表示本次请求提交的自动发货总开关；使用指针以便与可选的自动确认开关共同进入同一事务。
+	autoConfirm := req.AutoConfirm
+	// err 保存一个应用服务调用同时更新两个开关时产生的错误。
+	if _, err := s.accountSettingsApplication().UpdateSettings(r.Context(), accountapp.SettingsUpdateInput{
+		UserID: sess.UserID, AccountID: cid, AutoConfirm: &autoConfirm, AutoConsign: req.AutoConsign,
+	}); err != nil {
 		if errors.Is(err, accountapp.ErrForbidden) || errors.Is(err, accountapp.ErrNotFound) {
 			writeErr(w, http.StatusForbidden, "无权操作该账号")
 			return
@@ -638,7 +647,7 @@ func (s *Server) getCookieAutoConfirm(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, autoConfirmResponse{AutoConfirm: d.AutoConfirm})
+	writeJSON(w, http.StatusOK, autoConfirmResponse{AutoConfirm: d.AutoConfirm, AutoConsign: d.AutoConsign})
 }
 
 // setCookieRemark 设置备注。

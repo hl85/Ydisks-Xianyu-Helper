@@ -2,13 +2,70 @@ package adapter
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	orderapp "xianyu-go/internal/application/orders"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/xianyu/cookierefresh"
 	"xianyu-go/internal/xianyu/mtop"
 )
+
+// TestOrderRuntimeReleasesCredentialLockDuringConsign 验证确认发货的慢平台调用不会阻塞并发登录凭证写入。
+func TestOrderRuntimeReleasesCredentialLockDuringConsign(t *testing.T) {
+	// store、cleanup 保存并发确认发货测试使用的隔离数据库及释放函数。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// started、release 确定化平台确认发货期间的凭证更新窗口。
+	started, release := make(chan struct{}), make(chan struct{})
+	// client 在平台请求中暂停，返回旧响应 Cookie 以验证提交阶段的版本复核。
+	client := &orderRuntimeMTopFake{consign: func(context.Context, string, string) (bool, []string, string, error) {
+		close(started)
+		<-release
+		return true, []string{"SUCCESS"}, "sid=stale", nil
+	}}
+	// runtime 保存绑定测试平台客户端的订单运行时。
+	runtime := NewOrderRuntime(store, OrderRuntimeHooks{Client: func() mtop.Client { return client }, ClientAvailable: func() bool { return true }}, nil, nil)
+	// resultCh 接收异步确认发货结果。
+	resultCh := make(chan orderapp.ConsignResult, 1)
+	go func() {
+		resultCh <- runtime.ConfirmShipment(context.Background(), "cid", "order-lock", 1)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("确认发货未进入平台调用")
+	}
+	// updateDone 表示并发登录凭证写入已完成；若账号锁仍被占用，此处会超时。
+	updateDone := make(chan error, 1)
+	go func() {
+		// unlock 保护模拟登录写入的账号凭证临界区。
+		unlock := store.LockAccountCredentials("cid")
+		defer unlock()
+		updateDone <- store.Cookies.UpdateValueOwned(context.Background(), "cid", "sid=new-login", 1)
+	}()
+	select {
+	// updateErr 保存并发登录凭证写入结果。
+	case updateErr := <-updateDone:
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("平台确认发货期间并发凭证写入被账号锁阻塞")
+	}
+	close(release)
+	// result 保存旧平台响应被拒绝后的确认发货结果。
+	result := <-resultCh
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "账号凭证已变化") {
+		t.Fatalf("旧确认发货响应未被拒绝: %+v", result)
+	}
+	// stored、storedErr 验证新登录凭证仍是最终状态。
+	stored, storedErr := store.Cookies.GetValue(context.Background(), "cid")
+	if storedErr != nil || stored != "sid=new-login" {
+		t.Fatalf("旧确认发货响应覆盖了新登录凭证 stored=%q err=%v", stored, storedErr)
+	}
+}
 
 // TestOrderRuntimePersistsCookieSessionBranches 覆盖订单运行时 Cookie 更新的忽略、成功和失败分支。
 func TestOrderRuntimePersistsCookieSessionBranches(t *testing.T) {

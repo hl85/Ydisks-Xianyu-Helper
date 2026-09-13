@@ -145,22 +145,25 @@ func (r *OrderRuntime) consignWithCurrentCookie(ctx context.Context, cookieID, o
 	if r == nil || r.store == nil || r.store.Cookies == nil {
 		return false, nil, "", false, errors.New("订单凭证存储未初始化")
 	}
-	// unlock 保护当前账号凭证读取和写回，保持现有订单流程的串行语义。
+	// unlock 保护当前账号凭证读取；平台确认发货开始前必须释放账号锁。
 	unlock := r.store.LockAccountCredentials(cookieID)
-	defer unlock()
 	// detail、loadErr 保存按账号读取的平台运行凭证及错误。
 	detail, loadErr := r.store.Cookies.GetCookiePlatformRuntimeData(ctx, cookieID)
 	if loadErr != nil {
+		unlock()
 		return false, nil, "", false, loadErr
 	}
 	if detail.UserID != userID {
+		unlock()
 		return false, nil, "", false, orderapp.ErrForbidden
 	}
 	if !hasStoredOrderCredential(detail) {
+		unlock()
 		return false, nil, "", false, errors.New("账号 Cookie 为空")
 	}
 	// requestCtx、session 保存带 Cookie 快照的平台上下文及响应会话。
 	requestCtx, session := withOrderCookieSnapshot(ctx, detail)
+	unlock()
 	// client 保存当前平台调用客户端。
 	client := r.mtopClient()
 	if client == nil {
@@ -169,7 +172,7 @@ func (r *OrderRuntime) consignWithCurrentCookie(ctx context.Context, cookieID, o
 	// success、messages、updatedCookies、callErr 保存平台确认发货响应。
 	success, messages, updatedCookies, callErr := client.ConsignContext(requestCtx, detail.Value, orderID)
 	// value、valueChanged、handled、persistErr 保存响应 Cookie 会话写回结果。
-	value, valueChanged, handled, persistErr := r.persistOrderCookieSession(ctx, detail, session, updatedCookies)
+	value, valueChanged, handled, persistErr := r.persistCurrentOrderCookieSession(ctx, detail, session, updatedCookies, userID)
 	if persistErr != nil {
 		// wrappedPersistErr 保存包含订单语义的 Cookie 写回错误。
 		wrappedPersistErr := fmt.Errorf("保存发货响应 Cookie Jar: %w", persistErr)
@@ -189,14 +192,7 @@ func (r *OrderRuntime) consignWithCurrentCookie(ctx context.Context, cookieID, o
 	if callErr != nil {
 		return false, messages, "", false, callErr
 	}
-	if updatedCookies == "" || updatedCookies == detail.Value {
-		return success, messages, "", false, nil
-	}
-	// err 保存旧式平面 Cookie 写回错误。
-	if err := r.store.Cookies.UpdateValueOwned(ctx, cookieID, updatedCookies, userID); err != nil {
-		return success, messages, "", false, fmt.Errorf("保存发货响应 Cookie: %w", err)
-	}
-	return success, messages, updatedCookies, true, nil
+	return success, messages, "", false, nil
 }
 
 // UpdateRunningCookie 同步运行时账号 Cookie。
@@ -503,6 +499,37 @@ func (r *OrderRuntime) persistOrderCookieSession(ctx context.Context, detail db.
 		return value, value != detail.Value, true, persistErr
 	}
 	return value, value != detail.Value, true, nil
+}
+
+// persistCurrentOrderCookieSession 在写回响应前重新校验凭证版本，避免旧发货响应覆盖新登录状态。
+func (r *OrderRuntime) persistCurrentOrderCookieSession(ctx context.Context, detail db.CookiePlatformRuntimeData, session *mtop.CookieSession, updatedCookies string, userID int64) (string, bool, bool, error) {
+	if r == nil || r.store == nil || r.store.Cookies == nil {
+		return "", false, false, errors.New("账号 Cookie 持久化 repository 未初始化")
+	}
+	// unlock 保护平台响应完成后的凭证复核和条件写回，锁内不执行外部 I/O。
+	unlock := r.store.LockAccountCredentials(detail.ID)
+	defer unlock()
+	// latest、loadErr 保存平台调用完成后的当前账号凭证视图及读取错误。
+	latest, loadErr := r.store.Cookies.GetCookiePlatformRuntimeData(ctx, detail.ID)
+	if loadErr != nil {
+		return "", false, false, loadErr
+	}
+	if latest.UserID != userID || latest.UserID != detail.UserID || latest.Value != detail.Value || latest.MetadataJSON != detail.MetadataJSON {
+		return "", false, false, errors.New("账号凭证已变化，请重试")
+	}
+	// value、valueChanged、handled、persistErr 保存同一凭证版本的完整会话写回结果。
+	value, valueChanged, handled, persistErr := r.persistOrderCookieSession(ctx, latest, session, updatedCookies)
+	if persistErr != nil {
+		return value, valueChanged, handled, persistErr
+	}
+	if handled || strings.TrimSpace(updatedCookies) == "" || updatedCookies == latest.Value {
+		return value, valueChanged, handled, nil
+	}
+	// persistErr 保存旧版平台只返回扁平 Cookie 时的条件写回错误。
+	if persistErr := r.store.Cookies.UpdateValueOwned(ctx, detail.ID, updatedCookies, userID); persistErr != nil {
+		return "", false, false, persistErr
+	}
+	return updatedCookies, true, true, nil
 }
 
 // orderRuntimeMaxSoldOrderPages 限制一次订单发现最多请求的平台页数。

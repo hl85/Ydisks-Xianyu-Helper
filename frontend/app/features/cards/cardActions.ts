@@ -79,7 +79,7 @@ export interface CardActionsState {
 }
 
 // cardErrorMessage 将未知异常转换为稳定的卡密操作提示。
-const cardErrorMessage = (error: unknown, fallback: string): string => error instanceof Error ? error.message : fallback;
+const cardErrorMessage = (error: unknown, fallback = '状态失败'): string => error instanceof Error ? error.message : fallback;
 
 // useCardActions 集中管理卡密新增、编辑、删除、筛选和展示动作。
 export const useCardActions = ({ cards, loadCards }: CardActionsOptions): CardActionsState => {
@@ -170,7 +170,8 @@ export const useCardActions = ({ cards, loadCards }: CardActionsOptions): CardAc
       } else if (editForm.type === 'text') {
         updateData.text_content = editForm.text_content?.trim() || '';
       } else if (editForm.type === 'data') {
-        updateData.data_content = editForm.data_content?.trim() || '';
+        // 仅在用户实际修改库存编辑框时提交，避免旧库存快照覆盖自动发货结果。
+        if (editForm.data_content !== selectedCard.data_content) updateData.data_content = editForm.data_content?.trim() || '';
       } else if (editForm.type === 'image') {
         updateData.image_url = editForm.image_url?.trim() || '';
       }
@@ -243,10 +244,11 @@ export const useCardActions = ({ cards, loadCards }: CardActionsOptions): CardAc
   // toggleCardStatus 切换指定卡密组的启用状态并刷新库存。
   const toggleCardStatus = useCallback(/* toggleAction 切换卡密启用状态。 */ async (card: Card) => {
     try {
-      await updateCard(card.id, { ...card, enabled: !card.enabled });
+      // data_content 为 undefined 时请求 JSON 会省略库存字段，避免旧快照覆盖自动发货结果。
+      await updateCard(card.id, { ...card, enabled: !card.enabled, data_content: undefined });
       await loadCards();
-    } catch (/* error 表示卡密状态更新异常。 */ error: unknown) {
-      console.error('切换状态失败:', error);
+    } catch (/* error 表示卡密状态切换请求异常。 */ error: unknown) {
+      alert(cardErrorMessage(error));
     }
   }, [loadCards]);
 

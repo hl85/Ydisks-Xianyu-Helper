@@ -2643,6 +2643,7 @@ export interface components {
             has_cookie: boolean;
             enabled: boolean;
             auto_confirm: boolean;
+            auto_consign: boolean;
             remark: string;
             pause_duration: number;
             paused_until: number;
@@ -2670,6 +2671,7 @@ export interface components {
             cookie?: string;
             remark?: string;
             auto_confirm?: boolean;
+            auto_consign?: boolean;
             pause_duration?: number;
             username?: string;
             login_password?: string;
@@ -2692,9 +2694,12 @@ export interface components {
         };
         AutoConfirmRequest: {
             auto_confirm: boolean;
+            /** @description 自动发货后是否自动确认发货（转已发货）；省略时保持不变 */
+            auto_consign?: boolean;
         };
         AutoConfirmResponse: {
             auto_confirm: boolean;
+            auto_consign: boolean;
         };
         AccountRemarkRequest: {
             remark: string;

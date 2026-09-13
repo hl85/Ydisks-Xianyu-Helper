@@ -259,7 +259,10 @@ func (c *ClientImpl) PublishItem(ctx context.Context, cookiesStr string, req Pub
 			return nil, err
 		}
 	}
-	return c.publishItemOnce(ctx, currentCookies, req, uploaded, uploadedSpecImages, category)
+	// publishCtx、publishCancel 为最终发布 HTTP 请求创建独立的两分钟网络超时预算，不计入前置节流等待。
+	publishCtx, publishCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer publishCancel()
+	return c.publishItemOnce(publishCtx, currentCookies, req, uploaded, uploadedSpecImages, category)
 }
 
 // RecommendPublishCategory 根据关键词调用闲鱼推荐接口，返回可直接用于发布的完整类目。
@@ -634,7 +637,7 @@ func (c *ClientImpl) publishItemOnce(ctx context.Context, cookiesStr string, req
 	result := &PublishItemResult{
 		ItemID:         itemID,
 		Title:          req.Title,
-		PriceText:      centsText(req.PriceCents),
+		PriceText:      publishRepresentativePriceText(req),
 		CategoryID:     mtopString(cat["catId"]),
 		CategoryName:   mtopString(cat["catName"]),
 		ImageURL:       images[0].URL,

@@ -4,11 +4,180 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	itemapp "xianyu-go/internal/application/items"
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/xianyu/cookierefresh"
 	"xianyu-go/internal/xianyu/mtop"
 )
+
+// TestItemSyncNotifiesRuntimeAfterReleasingCredentialLock 验证 Cookie 提交通知不会在账号凭证锁内重入运行时。
+func TestItemSyncNotifiesRuntimeAfterReleasingCredentialLock(t *testing.T) {
+	// store、cleanup 管理隔离数据库及关闭责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// ctx 是凭证读取和同步提交共用的上下文。
+	ctx := context.Background()
+	// callbackDone 表示运行时通知已经成功重入同一账号凭证锁。
+	callbackDone := make(chan struct{})
+	// repository 注入会尝试重新获取账号凭证锁的运行时通知回调。
+	repository := NewItemSyncRepository(store, nil, nil, func(context.Context, string, string) {
+		// unlock 释放回调重新获取的账号凭证锁。
+		unlock := store.LockAccountCredentials("cid")
+		unlock()
+		close(callbackDone)
+	}, nil)
+	// query 描述当前账号的同步请求。
+	query := itemapp.SyncQuery{UserID: 1, CookieID: "cid"}
+	// detail、cookieValue、session、unlock 保存远端请求前取得的凭证状态。
+	detail, cookieValue, _, session, unlock, beginErr := repository.begin(ctx, query)
+	if beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	unlock()
+	// session 使用平台返回的新 Cookie 快照模拟一次成功轮换。
+	session.ReplaceSnapshot([]cookierefresh.BrowserCookie{{Name: "sid", Value: "rotated-after-unlock", Domain: ".goofish.com", Path: "/"}})
+	// finishErr 保存第一阶段提交结果；通知若在锁内执行，此调用会超过超时。
+	finishDone := make(chan error, 1)
+	go func() {
+		// finishErr 保存后台同步提交返回的错误。
+		_, _, _, finishErr := repository.finishRemote(ctx, query, detail, session, nil)
+		finishDone <- finishErr
+	}()
+	select {
+	// finishErr 表示后台同步提交完成后的错误。
+	case finishErr := <-finishDone:
+		if finishErr != nil {
+			t.Fatal(finishErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("同步提交未在释放账号锁后完成")
+	}
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("运行时通知无法重新获取账号凭证锁")
+	}
+	// saved、savedErr 验证通知对应的新 Cookie 已经持久化。
+	saved, savedErr := store.Cookies.GetCookiePlatformRuntimeData(ctx, query.CookieID)
+	if savedErr != nil || saved.Value == cookieValue {
+		t.Fatalf("Cookie 提交结果异常 saved=%+v err=%v", saved, savedErr)
+	}
+}
+
+// TestItemSyncRejectsStaleCookieWrite 验证同步期间的新登录凭证不会被旧平台响应覆盖；t 管理本地 SQLite 生命周期。
+func TestItemSyncRejectsStaleCookieWrite(t *testing.T) {
+	// store、cleanup 管理隔离数据库及关闭责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// ctx 是凭证读取和写入共用的上下文。
+	ctx := context.Background()
+	// owner、ownerErr 保存合成账号的所有者。
+	owner, ownerErr := store.Users.GetByUsername(ctx, "admin")
+	if ownerErr != nil {
+		t.Fatal(ownerErr)
+	}
+	// repository 使用真实凭证仓储复现远端请求返回后的提交阶段。
+	repository := NewItemSyncRepository(store, nil, nil, nil, nil)
+	// query 描述该所有者对测试账号发起的同步。
+	query := itemapp.SyncQuery{UserID: owner.ID, CookieID: "cid"}
+	// detail、session、unlock 保存发起远端调用前取得的凭证快照和会话。
+	detail, _, _, session, unlock, beginErr := repository.begin(ctx, query)
+	if beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	unlock()
+	// staleResponseSnapshot 模拟旧请求结束后携带的 Cookie Jar 变化。
+	staleResponseSnapshot := []cookierefresh.BrowserCookie{{Name: "sid", Value: "old-response", Domain: ".goofish.com", Path: "/"}}
+	session.ReplaceSnapshot(staleResponseSnapshot)
+	// updateErr 模拟用户在远端请求期间完成新的登录并写入更新凭证。
+	updateErr := store.Cookies.UpdateValueOwned(ctx, "cid", "unb=1; sid=newer-login", owner.ID)
+	if updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	// _, _, _, finishErr 必须拒绝使用旧快照写回的同步提交。
+	_, _, _, finishErr := repository.finishRemote(ctx, query, detail, session, nil)
+	// typedErr 保存同步层暴露给调用方的凭证阶段错误。
+	var typedErr *itemapp.SyncError
+	if !errors.As(finishErr, &typedErr) || typedErr.Kind != itemapp.SyncErrorCredential {
+		t.Fatalf("旧同步响应未被标记为凭证冲突 err=%v", finishErr)
+	}
+	// saved、savedErr 验证新登录结果仍是数据库的最终凭证。
+	saved, savedErr := store.Cookies.GetCookiePlatformRuntimeData(ctx, "cid")
+	if savedErr != nil || saved.Value != "unb=1; sid=newer-login" {
+		t.Fatalf("旧同步响应覆盖了新登录凭证 saved=%+v err=%v", saved, savedErr)
+	}
+}
+
+// TestItemSyncNotifiesRuntimeAfterCookieCommit 验证同步阶段写回平台 Cookie 后会通知运行中的账号。
+func TestItemSyncNotifiesRuntimeAfterCookieCommit(t *testing.T) {
+	// store、cleanup 管理隔离数据库及关闭责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// ctx 是凭证和同步提交共用的上下文。
+	ctx := context.Background()
+	// notified 保存运行时 Cookie 更新通知次数。
+	notified := 0
+	// repository 注入只记录通知次数的运行时回调。
+	repository := NewItemSyncRepository(store, nil, nil, func(context.Context, string, string) { notified++ }, nil)
+	// query 描述当前账号的同步请求。
+	query := itemapp.SyncQuery{UserID: 1, CookieID: "cid"}
+	// detail、cookieValue、session、unlock 保存远端请求前的凭证状态。
+	detail, cookieValue, _, session, unlock, beginErr := repository.begin(ctx, query)
+	if beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	unlock()
+	// session 使用平台返回的新 Cookie 快照模拟一次成功轮换。
+	session.ReplaceSnapshot([]cookierefresh.BrowserCookie{{Name: "sid", Value: "rotated", Domain: ".goofish.com", Path: "/"}})
+	// latest、finishedSession、callErr、finishErr 保存第一阶段提交结果。
+	latest, finishedSession, callErr, finishErr := repository.finishRemote(ctx, query, detail, session, nil)
+	if finishErr != nil || callErr != nil || latest == nil || finishedSession == nil {
+		t.Fatalf("Cookie 提交异常 latest=%+v callErr=%v finishErr=%v", latest, callErr, finishErr)
+	}
+	// enrichErr 验证第二阶段不会因重复检查而丢失第一次写回通知。
+	enrichErr := repository.persistAfterEnrich(ctx, query, latest, finishedSession, cookieValue, "")
+	if enrichErr != nil || notified != 1 {
+		t.Fatalf("运行时 Cookie 通知次数异常 notified=%d err=%v", notified, enrichErr)
+	}
+}
+
+// TestItemSyncDetailsReuseOperationCookieSession 验证商品详情探测沿用列表同步的 Cookie 会话。
+func TestItemSyncDetailsReuseOperationCookieSession(t *testing.T) {
+	// store、cleanup 保存隔离数据库及其关闭责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// detailSessionObserved 表示详情探测是否拿到了同步主流程会话。
+	detailSessionObserved := false
+	// client 为商品列表和详情探测提供本地平台响应。
+	client := &itemSyncListClient{
+		allResult: &mtop.ItemListResult{Items: []mtop.ItemListItem{{ID: "detail-session", Title: "详情会话商品"}}},
+		detect: func(ctx context.Context, _ string, _ string) (bool, error) {
+			// session 保存详情请求从上下文读取的同步 Cookie 会话。
+			session := mtop.CookieSessionFromContext(ctx)
+			if session == nil {
+				return false, errors.New("商品详情探测缺少同步 Cookie 会话")
+			}
+			detailSessionObserved = true
+			// 详情接口返回的完整 Cookie Jar 必须继续由同步流程持久化。
+			session.ReplaceSnapshot([]cookierefresh.BrowserCookie{{Name: "sid", Value: "detail-rotated", Domain: ".goofish.com", Path: "/"}})
+			return true, nil
+		},
+	}
+	// repository 使用平台替身执行完整商品同步流程。
+	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, nil)
+	// result、syncErr 保存全量同步结果及错误。
+	result, syncErr := repository.SyncAll(context.Background(), itemapp.SyncQuery{UserID: 1, CookieID: "cid", PageSize: 20, MaxPages: 1})
+	if syncErr != nil || result.TotalCount != 1 || !detailSessionObserved {
+		t.Fatalf("详情 Cookie 会话未复用 result=%+v observed=%v err=%v", result, detailSessionObserved, syncErr)
+	}
+	// runtime、runtimeErr 验证详情阶段产生的 Cookie 已经写回账号运行时凭证。
+	runtime, runtimeErr := store.Cookies.GetCookiePlatformRuntimeData(context.Background(), "cid")
+	if runtimeErr != nil || runtime.Value == "unb=1" {
+		t.Fatalf("详情 Cookie 未持久化 runtime=%+v err=%v", runtime, runtimeErr)
+	}
+}
 
 // TestIncompleteItemSyncPreservesItemsAndRules 验证分页层报告错误时，部分列表不能删除现有商品或规则；t 管理本地 SQLite 生命周期。
 func TestIncompleteItemSyncPreservesItemsAndRules(t *testing.T) {
@@ -49,5 +218,126 @@ func TestIncompleteItemSyncPreservesItemsAndRules(t *testing.T) {
 	}
 	if _, partialErr := store.Items.Get(ctx, "cid", "partial"); !errors.Is(partialErr, db.ErrNotFound) { // partialErr 验证部分列表没有被提前写入。
 		t.Fatal("同步失败仍写入了部分商品")
+	}
+}
+
+// TestItemSyncPageReturnsPersistenceFailure 验证分页商品任一写入失败时不会伪造成功数量。
+func TestItemSyncPageReturnsPersistenceFailure(t *testing.T) {
+	// store、cleanup 保存分页持久化测试使用的隔离数据库及释放函数。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// ctx 是分页同步和数据库断言共用的上下文。
+	ctx := context.Background()
+	// triggerSQL 拒绝指定商品写入，模拟数据库约束失败。
+	triggerSQL := `CREATE TRIGGER deny_page_item BEFORE INSERT ON item_info WHEN NEW.item_id='blocked-page-item' BEGIN SELECT RAISE(FAIL,'page item rejected'); END`
+	// triggerErr 保存数据库触发器创建错误。
+	if _, triggerErr := store.DB.ExecContext(ctx, triggerSQL); triggerErr != nil {
+		t.Fatal(triggerErr)
+	}
+	// client 返回先成功后失败的分页商品，验证整个页面事务一起回滚。
+	client := &itemSyncListClient{pageResult: &mtop.ItemListResult{PageNumber: 1, PageSize: 2, Items: []mtop.ItemListItem{{ID: "valid-page-item", Title: "先写商品"}, {ID: "blocked-page-item", Title: "拒绝商品"}}}}
+	// repository 使用真实事务仓储执行分页同步。
+	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, nil)
+	// result、syncErr 保存分页同步结果及错误。
+	result, syncErr := repository.SyncPage(ctx, itemapp.SyncQuery{UserID: 1, CookieID: "cid", PageNumber: 1, PageSize: 20})
+	// typedErr 保存分页层返回的应用阶段错误。
+	var typedErr *itemapp.SyncError
+	if result != (itemapp.SyncPageResult{}) || !errors.As(syncErr, &typedErr) || typedErr.Kind != itemapp.SyncErrorPersistence {
+		t.Fatalf("分页数据库错误未传播 result=%+v err=%v", result, syncErr)
+	}
+	// _, itemErr 验证事务失败后商品没有留下半条记录。
+	if _, itemErr := store.Items.Get(ctx, "cid", "blocked-page-item"); !errors.Is(itemErr, db.ErrNotFound) {
+		t.Fatalf("分页事务失败后不应保留商品 err=%v", itemErr)
+	}
+	// itemErr 保存前序商品回滚后的查询错误。
+	if _, itemErr := store.Items.Get(ctx, "cid", "valid-page-item"); !errors.Is(itemErr, db.ErrNotFound) {
+		t.Fatalf("分页事务失败后不应保留前序商品 err=%v", itemErr)
+	}
+}
+
+// TestItemSyncDetailProbeFailurePreservesExistingFlag 验证普通详情探测错误不会清除既有多规格标记。
+func TestItemSyncDetailProbeFailurePreservesExistingFlag(t *testing.T) {
+	// store、cleanup 保存详情错误测试使用的隔离数据库及释放函数。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// ctx 是商品夹具和同步操作共用的上下文。
+	ctx := context.Background()
+	// seedErr 写入已有多规格商品，作为探测失败时必须保留的状态。
+	if seedErr := store.Items.Upsert(ctx, &db.ItemInfoRow{CookieID: "cid", ItemID: "detail-error-item", IsMultiSpec: true}); seedErr != nil {
+		t.Fatal(seedErr)
+	}
+	// detailErr 模拟非凭证类的详情接口失败。
+	detailErr := errors.New("商品详情暂时不可用")
+	// recoveryCalls 记录不应被普通详情错误触发的凭证恢复回调次数。
+	recoveryCalls := 0
+	// client 返回商品列表和普通详情失败。
+	client := &itemSyncListClient{
+		allResult: &mtop.ItemListResult{Items: []mtop.ItemListItem{{ID: "detail-error-item", IsMultiSpec: false}}},
+		detect:    func(context.Context, string, string) (bool, error) { return false, detailErr },
+	}
+	// repository 使用真实同步流程验证探测错误传播。
+	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, func(context.Context, string, error) { recoveryCalls++ })
+	// result、syncErr 保存详情探测失败后的同步结果。
+	result, syncErr := repository.SyncAll(ctx, itemapp.SyncQuery{UserID: 1, CookieID: "cid", PageSize: 20, MaxPages: 1})
+	// typedErr 保存详情失败映射出的应用阶段错误。
+	var typedErr *itemapp.SyncError
+	if result != (itemapp.SyncAllResult{}) || !errors.As(syncErr, &typedErr) || typedErr.Kind != itemapp.SyncErrorPlatform || recoveryCalls != 0 {
+		t.Fatalf("详情普通错误映射异常 result=%+v err=%v recoveries=%d", result, syncErr, recoveryCalls)
+	}
+	// item、itemErr 验证详情失败时旧多规格标记没有被错误清零。
+	item, itemErr := store.Items.Get(ctx, "cid", "detail-error-item")
+	if itemErr != nil || !item.IsMultiSpec {
+		t.Fatalf("详情失败不应清除旧多规格标记 item=%+v err=%v", item, itemErr)
+	}
+}
+
+// TestItemSyncCredentialLoadFailuresArePersistenceErrors 验证提交阶段读取凭证失败不会被误报为凭证冲突。
+func TestItemSyncCredentialLoadFailuresArePersistenceErrors(t *testing.T) {
+	// ctx 是凭证提交失败测试共用的上下文。
+	ctx := context.Background()
+	// finishStore、finishCleanup 保存第一阶段提交测试数据库。
+	finishStore, finishCleanup := newAdapterTestStore(t)
+	defer finishCleanup()
+	// finishRepository 保存第一阶段凭证提交适配器。
+	finishRepository := NewItemSyncRepository(finishStore, nil, nil, nil, nil)
+	// finishDetail、finishSession、finishUnlock 保存关闭数据库前的凭证快照。
+	finishDetail, _, _, finishSession, finishUnlock, beginErr := finishRepository.begin(ctx, itemapp.SyncQuery{UserID: 1, CookieID: "cid"})
+	if beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	finishUnlock()
+	// closeErr 保存第一阶段测试数据库关闭错误。
+	if closeErr := finishStore.DB.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	// _, _, _, finishErr 保存第一阶段凭证读取失败的应用错误。
+	_, _, _, finishErr := finishRepository.finishRemote(ctx, itemapp.SyncQuery{UserID: 1, CookieID: "cid"}, finishDetail, finishSession, nil)
+	// finishTypedErr 保存第一阶段凭证读取错误的应用阶段分类。
+	var finishTypedErr *itemapp.SyncError
+	if !errors.As(finishErr, &finishTypedErr) || finishTypedErr.Kind != itemapp.SyncErrorPersistence {
+		t.Fatalf("第一阶段凭证读取失败分类异常: %v", finishErr)
+	}
+
+	// enrichStore、enrichCleanup 保存第二阶段提交测试数据库。
+	enrichStore, enrichCleanup := newAdapterTestStore(t)
+	defer enrichCleanup()
+	// enrichRepository 保存第二阶段凭证提交适配器。
+	enrichRepository := NewItemSyncRepository(enrichStore, nil, nil, nil, nil)
+	// enrichDetail、enrichSession、enrichUnlock 保存关闭数据库前的凭证快照。
+	enrichDetail, enrichCookie, _, enrichSession, enrichUnlock, enrichBeginErr := enrichRepository.begin(ctx, itemapp.SyncQuery{UserID: 1, CookieID: "cid"})
+	if enrichBeginErr != nil {
+		t.Fatal(enrichBeginErr)
+	}
+	enrichUnlock()
+	// closeErr 保存第二阶段测试数据库关闭错误。
+	if closeErr := enrichStore.DB.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	// enrichErr 保存第二阶段凭证读取失败的应用错误。
+	enrichErr := enrichRepository.persistAfterEnrich(ctx, itemapp.SyncQuery{UserID: 1, CookieID: "cid"}, enrichDetail, enrichSession, enrichCookie, "")
+	// enrichTypedErr 保存第二阶段凭证读取错误的应用阶段分类。
+	var enrichTypedErr *itemapp.SyncError
+	if !errors.As(enrichErr, &enrichTypedErr) || enrichTypedErr.Kind != itemapp.SyncErrorPersistence {
+		t.Fatalf("第二阶段凭证读取失败分类异常: %v", enrichErr)
 	}
 }

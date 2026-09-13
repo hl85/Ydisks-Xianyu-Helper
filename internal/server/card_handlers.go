@@ -23,8 +23,8 @@ type cardMutationRequest struct {
 	APIConfig json.RawMessage `json:"api_config"`
 	// TextContent 是 text 类型自动发货时发送的文本内容。
 	TextContent string `json:"text_content"`
-	// DataContent 是 data 类型尚未消费的逐行卡密库存。
-	DataContent string `json:"data_content"`
+	// DataContent 是 data 类型尚未消费的逐行卡密库存；指针用于区分省略和显式空库存。
+	DataContent *string `json:"data_content"`
 	// ImageURL 是 image 类型自动发货时发送的图片地址。
 	ImageURL string `json:"image_url"`
 	// Description 是用户维护的卡券组说明。
@@ -33,12 +33,12 @@ type cardMutationRequest struct {
 	Enabled bool `json:"enabled"`
 	// DelaySeconds 是自动发货前的延迟秒数。
 	DelaySeconds int `json:"delay_seconds"`
-	// IsMultiSpec 表示卡券组是否只匹配指定商品规格。
-	IsMultiSpec bool `json:"is_multi_spec"`
-	// SpecName 是多规格匹配使用的规格名称。
-	SpecName string `json:"spec_name"`
-	// SpecValue 是多规格匹配使用的规格值。
-	SpecValue string `json:"spec_value"`
+	// IsMultiSpec 表示卡券组是否只匹配指定商品规格；指针用于区分省略和显式 false。
+	IsMultiSpec *bool `json:"is_multi_spec"`
+	// SpecName 是多规格匹配使用的规格名称；指针用于区分省略和显式空字符串。
+	SpecName *string `json:"spec_name"`
+	// SpecValue 是多规格匹配使用的规格值；指针用于区分省略和显式空字符串。
+	SpecValue *string `json:"spec_value"`
 }
 
 // cardAppendRequest 是 data 类型卡券追加库存接口的具名请求 DTO。
@@ -246,11 +246,33 @@ func decodeCardDraft(r *http.Request) (cardsapp.Draft, error) {
 	if apiConfigErr != nil {
 		return cardsapp.Draft{}, apiConfigErr
 	}
+	// dataContent、dataContentSet 保存库存正文及请求是否明确提交该字段。
+	dataContent, dataContentSet := "", request.DataContent != nil
+	if request.DataContent != nil {
+		dataContent = *request.DataContent
+	}
+	// isMultiSpec、isMultiSpecSet 保存多规格开关及请求是否明确提交该字段。
+	isMultiSpec, isMultiSpecSet := false, request.IsMultiSpec != nil
+	if request.IsMultiSpec != nil {
+		isMultiSpec = *request.IsMultiSpec
+	}
+	// specName、specNameSet 保存规格名称及请求是否明确提交该字段。
+	specName, specNameSet := "", request.SpecName != nil
+	if request.SpecName != nil {
+		specName = *request.SpecName
+	}
+	// specValue、specValueSet 保存规格值及请求是否明确提交该字段。
+	specValue, specValueSet := "", request.SpecValue != nil
+	if request.SpecValue != nil {
+		specValue = *request.SpecValue
+	}
 	return cardsapp.Draft{
 		Name: request.Name, Type: request.Type, APIConfig: apiConfig,
-		TextContent: request.TextContent, DataContent: request.DataContent, ImageURL: request.ImageURL,
+		TextContent: request.TextContent, DataContent: dataContent, DataContentSet: dataContentSet, ImageURL: request.ImageURL,
 		Description: request.Description, Enabled: request.Enabled, DelaySeconds: request.DelaySeconds,
-		IsMultiSpec: request.IsMultiSpec, SpecName: request.SpecName, SpecValue: request.SpecValue,
+		IsMultiSpec: isMultiSpec, IsMultiSpecSet: isMultiSpecSet,
+		SpecName: specName, SpecNameSet: specNameSet,
+		SpecValue: specValue, SpecValueSet: specValueSet,
 	}, nil
 }
 

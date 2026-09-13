@@ -45,12 +45,12 @@ func TestDefaultReplyLifecycle(t *testing.T) {
 
 	// first、firstClaimed、firstErr 保存首次领取结果及其状态。
 	first, firstClaimed, firstErr := store.DefaultReps.ClaimRecord(ctx, cookieID, "chat", true, true)
-	if firstErr != nil || !firstClaimed || first.Status != "pending" || first.TextSent || first.ImageSent {
+	if firstErr != nil || !firstClaimed || first.Status != defaultReplyStatusSending || first.TextSent || first.ImageSent {
 		t.Fatalf("first=%+v claimed=%v err=%v", first, firstClaimed, firstErr)
 	}
 	// duplicate、duplicateClaimed 验证未完成租约阻止并发重复投递。
 	duplicate, duplicateClaimed, duplicateErr := store.DefaultReps.ClaimRecord(ctx, cookieID, "chat", true, true)
-	if duplicateErr != nil || duplicateClaimed || duplicate.Status != "pending" {
+	if duplicateErr != nil || duplicateClaimed || duplicate.Status != defaultReplyStatusSending {
 		t.Fatalf("duplicate=%+v claimed=%v err=%v", duplicate, duplicateClaimed, duplicateErr)
 	}
 	// err 表示未知默认回复部分的校验结果。

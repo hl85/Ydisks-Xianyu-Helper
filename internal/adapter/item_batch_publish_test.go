@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -112,6 +113,85 @@ func TestItemBatchPublishPortPersistsRemoteCheckpoint(t *testing.T) {
 	}
 	if publishCalls != 1 {
 		t.Fatalf("远端检查点重试不应再次调用平台: calls=%d", publishCalls)
+	}
+}
+
+// TestItemBatchPublishPortWaitsBeforeNetworkDeadline 验证适配器传给节流闸门的上下文不携带最终网络截止时间。
+func TestItemBatchPublishPortWaitsBeforeNetworkDeadline(t *testing.T) {
+	// store、cleanup 保存隔离数据库及其关闭责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// ctx 是节流与发布流程共享的无截止生命周期上下文。
+	ctx := context.Background()
+	// admin、adminErr 保存测试批次的用户身份及读取错误。
+	admin, adminErr := store.Users.GetByUsername(ctx, "admin")
+	if adminErr != nil {
+		t.Fatal(adminErr)
+	}
+	// batch 保存最小有效的待发布批次。
+	batch := &db.ItemPublishBatch{ID: "batch-wait-budget", UserID: admin.ID, DefaultCookieID: "cid", UploadDir: t.TempDir(), LocationJSON: `{}`, Status: "pending"}
+	// rows 保存批次中尚未发布的一条带图片明细。
+	rows := []db.ItemPublishBatchRow{{RowNo: 1, CookieID: "cid", Title: "节流商品", Price: "1", Quantity: 1, PostageMode: "free", ImagesJSON: `["wait-image.png"]`, CategoryJSON: `{"cat_id":"1","cat_name":"类目","channel_cat_id":"2"}`, Status: "pending"}}
+	// createErr 是创建测试批次及明细的持久化错误。
+	if createErr := store.PublishBatches.Create(ctx, batch, rows); createErr != nil {
+		t.Fatal(createErr)
+	}
+	// claimed、claimErr 保存批次租约的领取结果。
+	claimed, claimErr := store.PublishBatches.ClaimBatch(ctx, batch.ID, "worker-wait", time.Now().UTC().Add(time.Minute).Unix())
+	if claimErr != nil || !claimed {
+		t.Fatalf("领取批次失败 claimed=%v err=%v", claimed, claimErr)
+	}
+	// storedRows、rowsErr 保存领取后的明细行。
+	storedRows, rowsErr := store.PublishBatches.Rows(ctx, batch.ID)
+	if rowsErr != nil || len(storedRows) != 1 {
+		t.Fatalf("读取明细失败 rows=%+v err=%v", storedRows, rowsErr)
+	}
+	// rowClaimed、rowClaimErr 保存明细领取结果。
+	rowClaimed, rowClaimErr := store.PublishBatches.ClaimRow(ctx, storedRows[0].ID, "worker-wait")
+	if rowClaimErr != nil || !rowClaimed {
+		t.Fatalf("领取明细失败 claimed=%v err=%v", rowClaimed, rowClaimErr)
+	}
+	// waited 表示节流回调已由平台客户端安排在最终发布请求前执行。
+	waited := false
+	// client 在模拟图片和类目准备完成后执行发布前闸门，并验证最终请求仍保留独立网络截止时间。
+	client := batchPublishClientStub{publish: func(requestCtx context.Context, _ string, request mtop.PublishItemRequest) (*mtop.PublishItemResult, error) {
+		if request.BeforePublish == nil {
+			t.Fatal("最终发布请求缺少节流闸门")
+		}
+		// waitErr 保存最终发布请求前节流闸门返回的取消或租约错误。
+		if waitErr := request.BeforePublish(requestCtx); waitErr != nil {
+			t.Fatalf("最终发布请求前节流失败: %v", waitErr)
+		}
+		if !waited {
+			t.Fatal("节流等待未在最终发布请求前执行")
+		}
+		// hasDeadline 表示适配器是否错误地把最终网络截止时间带入了节流阶段。
+		if _, hasDeadline := requestCtx.Deadline(); hasDeadline {
+			t.Fatal("节流阶段不应继承最终发布网络截止时间")
+		}
+		return &mtop.PublishItemResult{ItemID: "wait-item", Title: "节流商品", PriceText: "1", Quantity: 1}, nil
+	}}
+	// port 保存使用平台替身的远端发布适配器。
+	port := NewItemBatchPublishPort(store, func() mtop.Client { return client }, nil, nil, nil,
+		// readImage 返回固定图片内容，使测试能抵达节流与网络调用边界。
+		func(string, string) ([]byte, string, string, error) {
+			return []byte("image"), "image/png", "wait-image.png", nil
+		},
+		// downloadImage 满足远程图片端口依赖；此场景仅使用本地图片。
+		func(context.Context, string) ([]byte, string, error) { return nil, "", nil })
+	// waitBeforePublish 模拟可长于网络预算的节流等待，并验证它不会消耗最终请求的网络预算。
+	waitBeforePublish := func(waitCtx context.Context) error {
+		// hasDeadline 表示节流等待是否错误继承最终网络请求的截止时间。
+		if _, hasDeadline := waitCtx.Deadline(); hasDeadline {
+			return errors.New("节流等待错误继承网络截止时间")
+		}
+		waited = true
+		return nil
+	}
+	// outcome、publishErr 保存远端发布结果及错误。
+	outcome, publishErr := port.PublishRemoteRow(ctx, admin.ID, batchRowApplicationModel(storedRows[0]), "worker-wait", waitBeforePublish)
+	if publishErr != nil || outcome.Result == nil || outcome.Result.ItemID != "wait-item" {
+		t.Fatalf("节流发布结果异常 outcome=%+v err=%v", outcome, publishErr)
 	}
 }
 

@@ -19,7 +19,7 @@ const runTaskMock = vi.mocked(runAccountTask);
 const updateSettingsMock = vi.mocked(updateAccountTaskSettings);
 
 // accountFixture 是 Hook 测试使用的启用账号对象。
-const accountFixture: AccountDetail = { id: 'account-1', enabled: true, auto_confirm: false, auto_rate_enabled: true, rate_content: '交易愉快', auto_polish_enabled: false, polish_time: '03:00' };
+const accountFixture: AccountDetail = { id: 'account-1', enabled: true, auto_confirm: false, auto_consign: false, auto_rate_enabled: true, rate_content: '交易愉快', auto_polish_enabled: false, polish_time: '03:00' };
 
 // settingsFixture 是账号任务接口返回的完整设置对象。
 const settingsFixture: AccountTaskSettingsResponse = { account_id: 'account-1', auto_rate_enabled: true, rate_content: '已保存文案', auto_polish_enabled: true, polish_time: '04:00', last_rate_scan_at: 0, last_polish_date: '', last_polish_at: 0 };

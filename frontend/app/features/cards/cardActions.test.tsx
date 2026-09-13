@@ -91,6 +91,29 @@ describe('useCardActions 卡密动作协调器', /* 当前回调验证卡密筛�
     expect(hook.result.current.showAddModal).toBe(false);
   });
 
+  test('编辑卡密名称时不提交过期库存和规格快照', /* 当前回调验证普通编辑交给服务端保留并发变化的卡密字段。 */ async () => {
+    // skuCard 保存带规格限制的 data 卡密组。
+    const skuCard: Card = {
+      ...cardFixture,
+      is_multi_spec: true,
+      spec_name: '套餐',
+      spec_value: '年度',
+    };
+    // loadCards 是规格卡编辑完成后的库存刷新替身。
+    const loadCards = vi.fn().mockResolvedValue(undefined);
+    // hook 是注入规格卡测试数据的动作 Hook。
+    const hook = renderHook(/* hookFactory 渲染规格卡动作 Hook。 */ () => useCardActions({ cards: [skuCard], loadCards }));
+    act(/* editAction 打开规格卡编辑表单。 */ () => hook.result.current.handleEdit(skuCard));
+    act(/* renameAction 只修改规格卡名称。 */ () => hook.result.current.setEditForm(current => ({ ...current, name: '年度套餐' })));
+    await act(/* saveAction 保存规格卡名称并等待刷新完成。 */ async () => hook.result.current.handleSaveEdit());
+    // mutation 保存名称编辑实际提交的字段，规格和库存快照应由服务端按省略语义保留。
+    const mutation = cardActionMocks.updateCard.mock.calls[0]?.[1];
+    expect(mutation).not.toHaveProperty('data_content');
+    expect(mutation).not.toHaveProperty('is_multi_spec');
+    expect(mutation).not.toHaveProperty('spec_name');
+    expect(mutation).not.toHaveProperty('spec_value');
+  });
+
   test('编辑 API 卡替换空模板时明确清空而不是保留旧模板', /* 当前回调验证敏感模板替换空值的显式清除语义。 */ async () => {
     // apiCard 保存只含脱敏摘要的 API 卡密组。
     const apiCard: Card = {
@@ -141,7 +164,30 @@ describe('useCardActions 卡密动作协调器', /* 当前回调验证卡密筛�
 
     cardActionMocks.updateCard.mockRejectedValueOnce(new Error('状态失败'));
     await act(/* toggleAction 执行失败的卡密启停切换。 */ async () => hook.result.current.toggleCardStatus(cardFixture));
+    expect(window.alert).toHaveBeenCalledWith('状态失败');
     expect(loadCards).not.toHaveBeenCalled();
+  });
+
+  test('状态切换不提交可能已经过期的数据卡库存', /* 当前回调验证启停动作与自动发货库存并发隔离。 */ async () => {
+    // actionContext 保存 data 卡片状态切换测试的 Hook 和刷新替身。
+    const { hook } = createCardHook();
+    await act(/* toggleAction 执行 data 卡启停切换。 */ async () => hook.result.current.toggleCardStatus(cardFixture));
+    expect(cardActionMocks.updateCard).toHaveBeenCalledWith(1, expect.objectContaining({ enabled: false }));
+    // mutation 保存状态切换实际提交的字段，库存字段必须为 undefined 以便 JSON 序列化时省略。
+    const mutation = cardActionMocks.updateCard.mock.calls[0]?.[1];
+    expect(mutation).toHaveProperty('data_content', undefined);
+  });
+
+  test('仅编辑数据卡元数据时不重复提交未修改库存', /* 当前回调验证数据卡普通编辑与并发出库隔离。 */ async () => {
+    // actionContext 保存 data 卡编辑动作的 Hook 和刷新替身。
+    const { hook } = createCardHook();
+    act(/* editAction 打开 data 卡编辑草稿。 */ () => hook.result.current.handleEdit(cardFixture));
+    act(/* nameAction 只修改 data 卡名称。 */ () => hook.result.current.setEditForm(current => ({ ...current, name: '库存一改名' })));
+    await act(/* saveAction 提交不含库存替换的普通编辑。 */ async () => hook.result.current.handleSaveEdit());
+    expect(cardActionMocks.updateCard).toHaveBeenCalledWith(1, expect.objectContaining({ name: '库存一改名' }));
+    // mutation 保存普通编辑实际提交的字段，未修改库存不可写回服务端。
+    const mutation = cardActionMocks.updateCard.mock.calls[0]?.[1];
+    expect(mutation).not.toHaveProperty('data_content');
   });
 
   test('复制卡密标识和下载模板均提供浏览器动作', /* 当前回调验证卡密复制和模板下载边界。 */ async () => {

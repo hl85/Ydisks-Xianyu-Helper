@@ -57,9 +57,9 @@ const pauseMock = vi.mocked(updateAccountPauseDuration);
 const updateAccountMock = vi.mocked(updateAccountSettings);
 
 // accountFixture 是账号编辑和登录流程使用的账号对象。
-const accountFixture = { id: 'account-1', enabled: true, value: 'old-cookie', remark: '旧备注', auto_confirm: false, pause_duration: 0, username: 'user@example.com', login_password: 'old-password', show_browser: false } as AccountDetail;
+const accountFixture = { id: 'account-1', enabled: true, value: 'old-cookie', remark: '旧备注', auto_confirm: false, auto_consign: false, pause_duration: 0, username: 'user@example.com', login_password: 'old-password', show_browser: false } as AccountDetail;
 // editFormFixture 是账号编辑弹窗的初始表单。
-const editFormFixture: AccountEditForm = { remark: '新备注', cookie: 'new-cookie', auto_confirm: true, pause_duration: 60, username: 'user@example.com', login_password: 'new-password', show_browser: true, showLoginPassword: false, clear_password: false };
+const editFormFixture: AccountEditForm = { remark: '新备注', cookie: 'new-cookie', auto_confirm: true, auto_consign: false, pause_duration: 60, username: 'user@example.com', login_password: 'new-password', show_browser: true, showLoginPassword: false, clear_password: false };
 // aiFixture 是账号 AI 设置的服务端配置。
 const aiFixture: AIReplySettings = { ai_enabled: true, auto_adjust_price_enabled: true, max_discount_percent: 20, max_discount_amount: 50, max_bargain_rounds: 2, custom_prompts: '请礼貌回复' };
 

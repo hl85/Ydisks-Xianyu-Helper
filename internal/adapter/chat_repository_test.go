@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	chatapp "xianyu-go/internal/application/chat"
@@ -334,8 +335,37 @@ func TestChatImageUploaderPersistsRefreshedCookieAndMapsPlatformErrors(t *testin
 	}
 	// _, persistenceErr 保存刷新凭证持久化失败时的适配错误。
 	_, persistenceErr := NewChatImageUploader(store, func() mtop.Client { return persistenceClient }, nil).UploadChatImage(ctx, "cid", "a.jpg", "image/jpeg", []byte("image"))
-	if persistenceErr == nil {
+	if persistenceErr == nil || strings.Contains(persistenceErr.Error(), "账号凭证已变化") {
 		t.Fatal("数据库关闭后刷新凭证写回应返回错误")
+	}
+}
+
+// TestChatImageUploaderRejectsStaleCookieWriteback 验证图片上传期间的新登录凭证不会被旧响应覆盖。
+func TestChatImageUploaderRejectsStaleCookieWriteback(t *testing.T) {
+	// store、cleanup 保存并发凭证测试使用的隔离数据库及释放函数。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// latestCookie 表示平台请求期间新登录流程写入的权威凭证。
+	latestCookie := "unb=1; _m_h5_tk=latest;"
+	// client 返回旧响应并在返回前模拟新登录写入。
+	client := fakeChatUploadClient{
+		upload: &mtop.ChatImageUpload{URL: "https://cdn.example/stale.jpg", UpdatedCookies: "unb=1; _m_h5_tk=stale;"},
+		beforeReturn: func() {
+			// updateErr 保存模拟并发登录凭证写入错误。
+			if updateErr := store.Cookies.UpdateValueOwned(context.Background(), "cid", latestCookie, 1); updateErr != nil {
+				t.Fatalf("并发登录凭证写入失败: %v", updateErr)
+			}
+		},
+	}
+	// _, uploadErr 保存检测到凭证指纹冲突后的上传结果。
+	_, uploadErr := NewChatImageUploader(store, func() mtop.Client { return client }, nil).UploadChatImage(context.Background(), "cid", "a.jpg", "image/jpeg", []byte("image"))
+	if uploadErr == nil || !strings.Contains(uploadErr.Error(), "账号凭证已变化") {
+		t.Fatalf("旧图片上传响应未被拒绝: %v", uploadErr)
+	}
+	// stored、storedErr 验证新登录凭证仍是数据库最终状态。
+	stored, storedErr := store.Cookies.GetValue(context.Background(), "cid")
+	if storedErr != nil || stored != latestCookie {
+		t.Fatalf("旧图片上传响应覆盖了新登录凭证 stored=%q err=%v", stored, storedErr)
 	}
 }
 

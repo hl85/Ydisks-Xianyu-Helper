@@ -45,6 +45,13 @@ type DefaultReplyRecord struct {
 	ImageSent bool
 }
 
+// uncertainReplyErrorPrefix 标记未知投递结果的降级隔离记录，阻止租约到期后自动重发。
+const uncertainReplyErrorPrefix = "uncertain:"
+
+// defaultReplyStatusSending 表示已经领取且即将调用外部发送接口的持久化状态。
+// 该状态的租约过期后也不能自动接管，避免数据库故障时重复发送一次性消息。
+const defaultReplyStatusSending = "sending"
+
 // ItemReply 对应 item_replay 表（指定商品回复）。
 type ItemReply struct {
 	ItemID       string
@@ -190,8 +197,8 @@ func (d *DefaultReplies) HasRecord(ctx context.Context, cookieID, chatID string)
 	return err == nil
 }
 
-// ClaimRecord 原子领取一次默认回复投递。新记录初始化为 pending；失败记录允许继续
-// 投递尚未成功的部分；pending/sent 记录会阻止并发重复发送。
+// ClaimRecord 原子领取一次默认回复投递。新记录初始化为 sending；失败记录允许继续
+// 投递尚未成功的部分；sending/pending/sent 记录会阻止并发重复发送。
 // ClaimRecord 封装ClaimRecord业务协调。
 func (d *DefaultReplies) ClaimRecord(ctx context.Context, cookieID, chatID string, needsText, needsImage bool) (DefaultReplyRecord, bool, error) {
 	// now 用于本次流程后续判断的now
@@ -201,7 +208,7 @@ func (d *DefaultReplies) ClaimRecord(ctx context.Context, cookieID, chatID strin
 	// query 用于本次流程后续判断的查询
 	query := dialectInsertIgnorePrefix(d.Dialect) + ` INTO default_reply_records
 		(cookie_id,chat_id,status,text_sent,image_sent,last_error,lease_expires_at,updated_at)
-		VALUES (?,?, 'pending', ?, ?, '', ?, CURRENT_TIMESTAMP)` + dialectInsertIgnore(d.Dialect, []string{"cookie_id", "chat_id"})
+		VALUES (?,?, 'sending', ?, ?, '', ?, CURRENT_TIMESTAMP)` + dialectInsertIgnore(d.Dialect, []string{"cookie_id", "chat_id"})
 	// res、err 用于本次流程后续判断的res、err
 	res, err := d.DB.ExecContext(ctx, query, cookieID, chatID, boolToInt(!needsText), boolToInt(!needsImage), leaseExpiresAt)
 	if err != nil {
@@ -209,7 +216,7 @@ func (d *DefaultReplies) ClaimRecord(ctx context.Context, cookieID, chatID strin
 	}
 	if // affected 用于本次流程后续判断的affected
 	affected, _ := res.RowsAffected(); affected > 0 {
-		return DefaultReplyRecord{Status: "pending", TextSent: !needsText, ImageSent: !needsImage}, true, nil
+		return DefaultReplyRecord{Status: defaultReplyStatusSending, TextSent: !needsText, ImageSent: !needsImage}, true, nil
 	}
 
 	// record、err 用于本次流程后续判断的record、err
@@ -220,13 +227,13 @@ func (d *DefaultReplies) ClaimRecord(ctx context.Context, cookieID, chatID strin
 	if record.Status == "sent" {
 		return record, false, nil
 	}
-	// pending 是发送任务的短租约。进程崩溃或强制退出后，过期租约必须可被
-	// 新实例接管，否则该会话会永久失去默认回复。
+	// pending 是旧版本发送任务的短租约。进程崩溃或强制退出后，历史 pending
+	// 记录仍可被新实例接管；新建记录使用 sending，避免未知结果自动重发。
 	res, err = d.DB.ExecContext(ctx, `UPDATE default_reply_records
 		SET status='pending',last_error='',lease_expires_at=?,updated_at=CURRENT_TIMESTAMP
 		WHERE cookie_id=? AND chat_id=?
-		  AND (status='failed' OR (status='pending' AND lease_expires_at<?))`,
-		leaseExpiresAt, cookieID, chatID, now)
+		  AND (status='failed' OR (status='pending' AND lease_expires_at<? AND COALESCE(last_error,'') NOT LIKE ?))`,
+		leaseExpiresAt, cookieID, chatID, now, uncertainReplyErrorPrefix+"%")
 	if err != nil {
 		return DefaultReplyRecord{}, false, err
 	}
@@ -274,6 +281,25 @@ func (d *DefaultReplies) MarkRecordFailed(ctx context.Context, cookieID, chatID,
 	_, err := d.DB.ExecContext(ctx, `UPDATE default_reply_records
 		SET status='failed',last_error=?,lease_expires_at=0,updated_at=CURRENT_TIMESTAMP WHERE cookie_id=? AND chat_id=?`, message, cookieID, chatID)
 	return err
+}
+
+// MarkRecordUncertain 隔离可能已经发送但未得到可靠本地确认的默认回复，避免自动重发。
+func (d *DefaultReplies) MarkRecordUncertain(ctx context.Context, cookieID, chatID, message string) error {
+	// err 保存将一次性回复转换为人工核对状态时的数据库错误。
+	_, err := d.DB.ExecContext(ctx, `UPDATE default_reply_records
+		SET status='uncertain',last_error=?,lease_expires_at=0,updated_at=CURRENT_TIMESTAMP WHERE cookie_id=? AND chat_id=?`, message, cookieID, chatID)
+	if err == nil {
+		return nil
+	}
+	// fallbackMessage 保存无法写入 uncertain 状态时仍可持久化的隔离标记。
+	fallbackMessage := uncertainReplyErrorPrefix + message
+	// fallbackErr 保存降级为 pending 隔离记录时的数据库错误。
+	_, fallbackErr := d.DB.ExecContext(ctx, `UPDATE default_reply_records
+		SET status='pending',last_error=?,lease_expires_at=0,updated_at=CURRENT_TIMESTAMP WHERE cookie_id=? AND chat_id=?`, fallbackMessage, cookieID, chatID)
+	if fallbackErr == nil {
+		return nil
+	}
+	return errors.Join(err, fallbackErr)
 }
 
 // MarkRecordSent 封装MarkRecordSent业务协调。

@@ -672,6 +672,12 @@ func newAutomationTestStore(t *testing.T) (*db.Store, func()) {
 	err := store.Cookies.Save(context.Background(), "cid", "unb=123; _m_h5_tk=tk_1;", admin.ID); err != nil {
 		t.Fatalf("save cookie: %v", err)
 	}
+	// enabled 表示自动化回归夹具默认开启自动发货后的平台确认，具体关闭场景由测试显式设置。
+	enabled := true
+	// err 表示自动化回归夹具开启平台确认发货时的设置写入错误。
+	if _, err := store.Cookies.UpdateSettings(context.Background(), "cid", db.AccountSettingsUpdate{UserID: admin.ID, AutoConsign: &enabled}); err != nil {
+		t.Fatalf("enable auto consign: %v", err)
+	}
 	return store, func() { _ = database.Close() }
 }
 

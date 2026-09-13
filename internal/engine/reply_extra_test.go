@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"xianyu-go/internal/automation"
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/xianyu/ws"
 )
 
 // fakeAPIReplier 可控的 API 回复 mock：返回预设结果或错误。
@@ -41,6 +43,10 @@ type recordingSender struct {
 	images   []imageSent
 	textErr  error
 	imageErr error
+	// textCalls 统计文本发送尝试次数，包含返回错误的传输调用。
+	textCalls int
+	// beforeTextError 在文本发送返回错误前执行，用于模拟发送过程中取消请求上下文。
+	beforeTextError func()
 }
 
 // textSent 用于本次流程后续判断的文本Sent
@@ -56,11 +62,47 @@ type imageSent struct {
 
 // SendText 封装Send文本业务协调。
 func (r *recordingSender) SendText(_ context.Context, chatID, toUserID, text string) error {
+	r.textCalls++
+	if r.beforeTextError != nil {
+		r.beforeTextError()
+	}
 	if r.textErr != nil {
 		return r.textErr
 	}
 	r.texts = append(r.texts, textSent{chatID, toUserID, text})
 	return nil
+}
+
+// TestReplyOnceMarksDefiniteFailureWithIndependentContext 验证取消发送上下文时确定未发送状态仍可被领取重试。
+func TestReplyOnceMarksDefiniteFailureWithIndependentContext(t *testing.T) {
+	// store、cleanup 保存隔离数据库及关闭责任。
+	store, cleanup := newReplyStore(t)
+	defer cleanup()
+	// setupErr 保存启用一次性默认回复的配置写入错误。
+	if setupErr := store.DefaultReps.Upsert(context.Background(), "cid", db.DefaultReply{Enabled: true, ReplyOnce: true, ReplyContent: "欢迎"}); setupErr != nil {
+		t.Fatal(setupErr)
+	}
+	// requestCtx、cancel 保存会在发送失败期间被取消的原始请求上下文。
+	requestCtx, cancel := context.WithCancel(context.Background())
+	// sender 模拟确定未发送错误，并在返回前取消原始请求上下文。
+	sender := &recordingSender{textErr: automation.ErrMessageNotSent, beforeTextError: cancel}
+	// service 使用真实状态仓储验证失败状态可恢复。
+	service := NewReplyService("cid", store, sender, nil, nil, nil)
+	// sendErr 保存确定未发送错误的回复结果。
+	if sendErr := service.Handle(requestCtx, chatMsg("你好", "", "chat-definite-failure")); !errors.Is(sendErr, automation.ErrMessageNotSent) {
+		t.Fatalf("确定未发送错误未透传: %v", sendErr)
+	}
+	// record、recordErr 保存第一次失败后的状态。
+	record, recordErr := store.DefaultReps.Record(context.Background(), "cid", "chat-definite-failure")
+	if recordErr != nil || record.Status != "failed" {
+		t.Fatalf("取消上下文不应遗留 sending 状态 record=%+v err=%v", record, recordErr)
+	}
+	// sender 恢复成功发送，验证 failed 记录可被下一次请求重新领取。
+	sender.textErr = nil
+	// retryErr 保存重新领取失败状态后的回复结果。
+	if retryErr := service.Handle(context.Background(), chatMsg("还在吗", "", "chat-definite-failure")); retryErr != nil || sender.textCalls != 2 {
+		t.Fatalf("失败状态无法重新领取 retryErr=%v calls=%d", retryErr, sender.textCalls)
+	}
 }
 
 // SendImage 封装Send图片业务协调。
@@ -149,6 +191,121 @@ func TestReplyOnceRetriesOnlyFailedParts(t *testing.T) {
 	record, err = s.DefaultReps.Record(ctx, "cid", "chat-retry")
 	if err != nil || record.Status != "sent" || !record.ImageSent || !record.TextSent {
 		t.Fatalf("sent record=%+v err=%v", record, err)
+	}
+}
+
+// TestReplyOnceQuarantinesUncertainSend 验证平台可能已送达时不允许一次性默认回复自动重发。
+func TestReplyOnceQuarantinesUncertainSend(t *testing.T) {
+	// store、cleanup 保存隔离数据库及其关闭责任。
+	store, cleanup := newReplyStore(t)
+	defer cleanup()
+	// ctx 是默认回复配置和发送状态读写使用的无截止上下文。
+	ctx := context.Background()
+	// setupErr 保存启用一次性默认回复的配置写入错误。
+	setupErr := store.DefaultReps.Upsert(ctx, "cid", db.DefaultReply{Enabled: true, ReplyOnce: true, ReplyContent: "欢迎"})
+	if setupErr != nil {
+		t.Fatal(setupErr)
+	}
+	// sender 模拟平台连接在发送后断开，无法判断消息是否已经送达。
+	sender := &recordingSender{textErr: &ws.SendError{Kind: ws.SendUncertain}}
+	// service 使用真实投递记录存储验证不确定结果隔离。
+	service := NewReplyService("cid", store, sender, nil, nil, nil)
+	// firstErr 保存首次发送返回的不确定错误。
+	firstErr := service.Handle(ctx, chatMsg("你好", "", "chat-uncertain"))
+	if firstErr == nil {
+		t.Fatal("不确定发送结果必须返回调用错误")
+	}
+	// secondErr 保存同一会话再次触发时的结果；它不应发出第二条消息。
+	secondErr := service.Handle(ctx, chatMsg("还在吗", "", "chat-uncertain"))
+	if secondErr != nil || sender.textCalls != 1 {
+		t.Fatalf("不确定结果后不应重发 secondErr=%v calls=%d", secondErr, sender.textCalls)
+	}
+	// record、recordErr 保存最终隔离状态及查询错误。
+	record, recordErr := store.DefaultReps.Record(ctx, "cid", "chat-uncertain")
+	if recordErr != nil || record.Status != "uncertain" {
+		t.Fatalf("不确定回复未隔离 record=%+v err=%v", record, recordErr)
+	}
+}
+
+// TestReplyOnceQuarantinesWhenUncertainStateIsRejected 验证 uncertain 状态被数据库约束拒绝时，降级隔离仍阻止租约重发。
+func TestReplyOnceQuarantinesWhenUncertainStateIsRejected(t *testing.T) {
+	// store、cleanup 保存隔离数据库及其关闭责任。
+	store, cleanup := newReplyStore(t)
+	defer cleanup()
+	// ctx 是默认回复配置、发送状态和租约更新共用的无截止上下文。
+	ctx := context.Background()
+	// setupErr 保存启用一次性默认回复的配置写入错误。
+	if setupErr := store.DefaultReps.Upsert(ctx, "cid", db.DefaultReply{Enabled: true, ReplyOnce: true, ReplyContent: "欢迎"}); setupErr != nil {
+		t.Fatal(setupErr)
+	}
+	// triggerErr 模拟数据库拒绝直接进入 uncertain 状态的约束错误。
+	if _, triggerErr := store.DB.ExecContext(ctx, `CREATE TRIGGER deny_uncertain_status BEFORE UPDATE OF status ON default_reply_records WHEN NEW.status='uncertain' BEGIN SELECT RAISE(FAIL,'fixture rejection'); END`); triggerErr != nil {
+		t.Fatal(triggerErr)
+	}
+	// sender 让平台返回可能已送达的未知结果。
+	sender := &recordingSender{textErr: &ws.SendError{Kind: ws.SendUncertain}}
+	// service 使用真实投递记录存储验证降级隔离。
+	service := NewReplyService("cid", store, sender, nil, nil, nil)
+	// firstErr 保存首次发送返回的不确定错误。
+	if firstErr := service.Handle(ctx, chatMsg("你好", "", "chat-uncertain-fallback")); firstErr == nil {
+		t.Fatal("不确定发送结果必须返回调用错误")
+	}
+	// expireErr 保存租约到期模拟更新结果。
+	if _, expireErr := store.DB.ExecContext(ctx, `UPDATE default_reply_records SET lease_expires_at=0 WHERE cookie_id=? AND chat_id=?`, "cid", "chat-uncertain-fallback"); expireErr != nil {
+		t.Fatal(expireErr)
+	}
+	// secondErr 保存同一会话再次触发时的结果；降级隔离记录不应再次发送。
+	secondErr := service.Handle(ctx, chatMsg("还在吗", "", "chat-uncertain-fallback"))
+	if secondErr != nil || sender.textCalls != 1 {
+		t.Fatalf("降级隔离后不应重发 secondErr=%v calls=%d", secondErr, sender.textCalls)
+	}
+	// record、recordErr 保存降级隔离后的记录状态及查询错误。
+	record, recordErr := store.DefaultReps.Record(ctx, "cid", "chat-uncertain-fallback")
+	if recordErr != nil || record.Status != "pending" {
+		t.Fatalf("降级隔离记录状态异常 record=%+v err=%v", record, recordErr)
+	}
+}
+
+// TestReplyOnceDoesNotReclaimWhenUncertainPersistenceFails 验证未知结果的两次状态写入都失败时仍不会自动重发。
+func TestReplyOnceDoesNotReclaimWhenUncertainPersistenceFails(t *testing.T) {
+	// store、cleanup 保存隔离数据库及其关闭责任。
+	store, cleanup := newReplyStore(t)
+	defer cleanup()
+	// ctx 是默认回复配置、发送状态和租约更新共用的无截止上下文。
+	ctx := context.Background()
+	// setupErr 保存启用一次性默认回复的配置写入错误。
+	if setupErr := store.DefaultReps.Upsert(ctx, "cid", db.DefaultReply{Enabled: true, ReplyOnce: true, ReplyContent: "欢迎"}); setupErr != nil {
+		t.Fatal(setupErr)
+	}
+	// triggerErr 模拟数据库在未知结果写入期间完全拒绝状态更新。
+	if _, triggerErr := store.DB.ExecContext(ctx, `CREATE TRIGGER deny_reply_state_updates BEFORE UPDATE ON default_reply_records BEGIN SELECT RAISE(FAIL,'fixture write failure'); END`); triggerErr != nil {
+		t.Fatal(triggerErr)
+	}
+	// sender 模拟平台可能已经送达但连接返回未知结果。
+	sender := &recordingSender{textErr: &ws.SendError{Kind: ws.SendUncertain}}
+	// service 使用真实投递记录存储验证 sending 状态的持久化保护。
+	service := NewReplyService("cid", store, sender, nil, nil, nil)
+	// firstErr 保存首次发送返回的不确定错误。
+	if firstErr := service.Handle(ctx, chatMsg("你好", "", "chat-uncertain-db-down")); firstErr == nil {
+		t.Fatal("不确定发送结果必须返回调用错误")
+	}
+	// dropErr 恢复租约更新能力，模拟数据库恢复后再次收到同一会话消息。
+	if _, dropErr := store.DB.ExecContext(ctx, `DROP TRIGGER deny_reply_state_updates`); dropErr != nil {
+		t.Fatal(dropErr)
+	}
+	// expireErr 模拟原领取租约已过期。
+	if _, expireErr := store.DB.ExecContext(ctx, `UPDATE default_reply_records SET lease_expires_at=0 WHERE cookie_id=? AND chat_id=?`, "cid", "chat-uncertain-db-down"); expireErr != nil {
+		t.Fatal(expireErr)
+	}
+	// secondErr 保存数据库恢复后的再次处理结果；sending 记录不得触发第二次外部发送。
+	secondErr := service.Handle(ctx, chatMsg("还在吗", "", "chat-uncertain-db-down"))
+	if secondErr != nil || sender.textCalls != 1 {
+		t.Fatalf("数据库写入失败后不应重发 secondErr=%v calls=%d", secondErr, sender.textCalls)
+	}
+	// record、recordErr 保存仍需人工核对的发送状态及读取错误。
+	record, recordErr := store.DefaultReps.Record(ctx, "cid", "chat-uncertain-db-down")
+	if recordErr != nil || record.Status != "sending" {
+		t.Fatalf("未知结果状态不应回到可重试 pending record=%+v err=%v", record, recordErr)
 	}
 }
 

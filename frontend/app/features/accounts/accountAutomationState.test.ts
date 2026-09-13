@@ -4,7 +4,7 @@ import { buildAccountTaskDefaults,canStartAccountTask,isCurrentAccountTaskReques
 
 // accountFixture 是覆盖任务默认值和账号禁用边界的最小账号数据。
 const accountFixture: AccountDetail = {
-  id: 'a1', enabled: true, auto_confirm: false, auto_rate_enabled: true, rate_content: '交易愉快', auto_polish_enabled: false, polish_time: '03:00',
+  id: 'a1', enabled: true, auto_confirm: false, auto_consign: false, auto_rate_enabled: true, rate_content: '交易愉快', auto_polish_enabled: false, polish_time: '03:00',
 };
 
 test('账号任务默认设置继承账号配置并保持安全文案',

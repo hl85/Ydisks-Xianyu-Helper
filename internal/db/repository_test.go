@@ -179,6 +179,21 @@ func TestCookieSaveRequiresInit(t *testing.T) {
 	enabled, err := s.Cookies.GetAutoConfirm(ctx, "cid"); err != nil || !enabled {
 		t.Fatalf("GetAutoConfirm=%v want true, err=%v", enabled, err)
 	}
+	// consignEnabled、consignErr 验证新账号默认不自动调用平台确认发货接口。
+	consignEnabled, consignErr := s.Cookies.GetAutoConsign(ctx, "cid")
+	if consignErr != nil || consignEnabled {
+		t.Fatalf("GetAutoConsign=%v want false, err=%v", consignEnabled, consignErr)
+	}
+	// autoConsignUpdate 验证账号设置事务可以显式开启自动确认发货动作。
+	autoConsignUpdate := true
+	// updateErr 表示 SQLite 写入自动确认发货开关时的错误。
+	if _, updateErr := s.Cookies.UpdateSettings(ctx, "cid", AccountSettingsUpdate{UserID: admin.ID, AutoConsign: &autoConsignUpdate}); updateErr != nil {
+		t.Fatalf("开启 auto_consign: %v", updateErr)
+	}
+	// consignEnabled、consignErr 验证显式开启后能从 SQLite 读回新开关。
+	if consignEnabled, consignErr := s.Cookies.GetAutoConsign(ctx, "cid"); consignErr != nil || !consignEnabled {
+		t.Fatalf("开启后 GetAutoConsign=%v err=%v", consignEnabled, consignErr)
+	}
 	if // err 用于本次流程后续判断的err
 	_, err := s.DB.ExecContext(ctx, `UPDATE cookies SET auto_confirm=0 WHERE id=?`, "cid"); err != nil {
 		t.Fatalf("关闭 auto_confirm: %v", err)

@@ -18,6 +18,8 @@ type CardAPIConfigSummary struct {
 	Method string `json:"method"`
 	// TimeoutSeconds 是请求超时时间，单位为秒。
 	TimeoutSeconds int `json:"timeout_seconds"`
+	// ContentType 是 POST 请求正文编码类型，供编辑器无损回显。
+	ContentType string `json:"content_type"`
 	// ResponsePath 是响应提取路径。
 	ResponsePath string `json:"response_path,omitempty"`
 	// RetryEnabled 表示是否启用幂等重试。
@@ -88,6 +90,10 @@ func summarizeCardAPIConfig(cardType, raw string) *CardAPIConfigSummary {
 		summary.Method = "GET"
 	}
 	summary.TimeoutSeconds = parseSummaryTimeout(fields)
+	summary.ContentType = summaryRawString(fields["content_type"])
+	if summary.ContentType == "" {
+		summary.ContentType = "application/json"
+	}
 	summary.ResponsePath = summaryRawString(fields["response_path"])
 	summary.RetryEnabled = strings.EqualFold(summaryRawString(fields["retry_enabled"]), "true")
 	summary.HeadersConfigured = templateConfigured(fields["headers"])

@@ -24,8 +24,10 @@ type SettingsUpdateInput struct {
 	Cookie *string
 	// Remark 是可选的账号备注更新值。
 	Remark *string
-	// AutoConfirm 是可选的自动确认发货开关。
+	// AutoConfirm 是可选的自动发货总开关（付款后自动发卡密/模板消息）。
 	AutoConfirm *bool
+	// AutoConsign 是可选的自动确认发货（转已发货）开关。
+	AutoConsign *bool
 	// PauseDuration 是可选的暂停时长，单位为分钟；零表示立即恢复。
 	PauseDuration *int
 	// Username 是可选的密码登录用户名更新值。
@@ -259,9 +261,14 @@ func (s *SettingsService) SetStatus(ctx context.Context, userID int64, accountID
 	return result, nil
 }
 
-// SetAutoConfirm 更新账号自动确认发货开关。
+// SetAutoConfirm 更新账号自动发货总开关。
 func (s *SettingsService) SetAutoConfirm(ctx context.Context, userID int64, accountID string, enabled bool) (SettingsResult, error) {
 	return s.UpdateSettings(ctx, SettingsUpdateInput{UserID: userID, AccountID: accountID, AutoConfirm: &enabled})
+}
+
+// SetAutoConsign 更新账号自动确认发货（转已发货）开关。
+func (s *SettingsService) SetAutoConsign(ctx context.Context, userID int64, accountID string, enabled bool) (SettingsResult, error) {
+	return s.UpdateSettings(ctx, SettingsUpdateInput{UserID: userID, AccountID: accountID, AutoConsign: &enabled})
 }
 
 // SetRemark 更新账号备注。

@@ -7,7 +7,7 @@ import (
 	"xianyu-go/internal/db"
 )
 
-// TestConfirmShipmentWithProofCoversPreflightBranches 验证确认发货在订单号缺失、账号关闭自动确认和数据库失败时的前置分支。
+// TestConfirmShipmentWithProofCoversPreflightBranches 验证确认发货在订单号缺失、账号关闭自动确认、数据库失败时的前置分支。
 func TestConfirmShipmentWithProofCoversPreflightBranches(t *testing.T) {
 	// ctx 是本测试确认发货入口共用的非取消上下文。
 	ctx := context.Background()
@@ -21,17 +21,17 @@ func TestConfirmShipmentWithProofCoversPreflightBranches(t *testing.T) {
 	if missingOrderErr == nil {
 		t.Fatal("缺少订单号应拒绝确认发货")
 	}
-	// disabledAutoConfirm 保存关闭账号自动确认设置的值。
-	disabledAutoConfirm := false
-	// _, disableErr 保存关闭账号自动确认设置的更新错误。
-	_, disableErr := emptyStore.Cookies.UpdateSettings(ctx, "cid", db.AccountSettingsUpdate{UserID: 1, AutoConfirm: &disabledAutoConfirm})
+	// disabledAutoConsign 保存关闭订单转已发货动作的值；自动发货总开关仍保持开启。
+	disabledAutoConsign := false
+	// _, disableErr 保存关闭订单转已发货设置的更新错误。
+	_, disableErr := emptyStore.Cookies.UpdateSettings(ctx, "cid", db.AccountSettingsUpdate{UserID: 1, AutoConsign: &disabledAutoConsign})
 	if disableErr != nil {
 		t.Fatal(disableErr)
 	}
-	// skipErr 保存非强制确认在账号设置关闭时的跳过结果。
-	skipErr := center.confirmShipment(ctx, Task{AccountID: "cid", OrderID: "disabled-auto-confirm"})
+	// skipErr 保存非强制确认在自动确认开关关闭时的跳过结果。
+	skipErr := center.confirmShipment(ctx, Task{AccountID: "cid", OrderID: "disabled-auto-consign"})
 	if skipErr != nil {
-		t.Fatalf("关闭自动确认时应安全跳过：%v", skipErr)
+		t.Fatalf("关闭自动确认发货时应安全跳过：%v", skipErr)
 	}
 
 	// closedStore、closedCleanup 保存随后关闭数据库连接的测试存储。

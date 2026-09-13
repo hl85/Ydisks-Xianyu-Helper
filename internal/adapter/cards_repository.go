@@ -95,6 +95,15 @@ func (r *CardsRepository) Update(ctx context.Context, card cardsapp.Card) error 
 	return r.store.Cards.Update(ctx, &record)
 }
 
+// UpdateDataMetadata 更新 data 卡券元数据，数据库始终保留当前库存正文。
+func (r *CardsRepository) UpdateDataMetadata(ctx context.Context, card cardsapp.Card) error {
+	// err 表示卡券适配器依赖缺失时的装配错误。
+	if err := r.validate(); err != nil {
+		return err
+	}
+	return r.store.Cards.UpdateDataMetadata(ctx, &db.CardFull{ID: card.ID, Name: card.Name, Type: card.Type, Description: card.Description, Enabled: card.Enabled, DelaySeconds: card.DelaySeconds, IsMultiSpec: card.IsMultiSpec, SpecName: card.SpecName, SpecValue: card.SpecValue})
+}
+
 // Delete 删除指定卡券组，并原样返回数据库约束或连接错误。
 func (r *CardsRepository) Delete(ctx context.Context, cardID int64) error {
 	// err 表示卡券适配器依赖缺失时的装配错误。
@@ -129,7 +138,7 @@ func cardApplicationModel(record db.CardFull) cardsapp.Card {
 		// summaryValue 保存当前记录的独立摘要副本，避免共享数据库对象。
 		summaryValue := cardsapp.APIConfigSummary{
 			URL: record.APIConfigSummary.URL, Method: record.APIConfigSummary.Method,
-			TimeoutSeconds: record.APIConfigSummary.TimeoutSeconds, ResponsePath: record.APIConfigSummary.ResponsePath,
+			TimeoutSeconds: record.APIConfigSummary.TimeoutSeconds, ContentType: record.APIConfigSummary.ContentType, ResponsePath: record.APIConfigSummary.ResponsePath,
 			RetryEnabled: record.APIConfigSummary.RetryEnabled, HeadersConfigured: record.APIConfigSummary.HeadersConfigured,
 			ParamsConfigured: record.APIConfigSummary.ParamsConfigured, Ready: record.APIConfigSummary.Ready,
 			ValidationError: record.APIConfigSummary.ValidationError,

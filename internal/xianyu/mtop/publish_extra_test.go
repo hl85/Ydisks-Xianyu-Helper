@@ -95,6 +95,10 @@ func TestPublishItemBuildsOfficialMultiSKUPayload(t *testing.T) {
 			fmt.Fprint(w, `{"object":{"url":"https://cdn/spec.jpg","pix":"800x600"}}`)
 		},
 		"mtop.idle.pc.idleitem.publish": func(w http.ResponseWriter, r *http.Request) {
+			// _, hasDeadline 验证最终发布请求拥有独立的网络超时预算。
+			if _, hasDeadline := r.Context().Deadline(); !hasDeadline {
+				t.Error("最终发布 HTTP 请求缺少独立截止时间")
+			}
 			publishedData, _ = parseDataURL(readBody(r))
 			fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"itemId":"multi-item"}}`)
 		},
@@ -120,7 +124,7 @@ func TestPublishItemBuildsOfficialMultiSKUPayload(t *testing.T) {
 	}
 	// result、err 保存本地传输执行后的发布结果。
 	result, err := client.PublishItem(context.Background(), consignCookies, request)
-	if err != nil || result == nil || result.ItemID != "multi-item" {
+	if err != nil || result == nil || result.ItemID != "multi-item" || result.PriceText != "9.90" {
 		t.Fatalf("多规格发布失败 result=%+v err=%v", result, err)
 	}
 	// properties、ok 保存官方 itemProperties 结构。
@@ -200,7 +204,11 @@ func TestPublishItemDescriptionDefaultsToTitle(t *testing.T) {
 		PostageCents: 500,
 		Location:     &PublishLocation{Area: "X", City: "Y", DivisionID: "1", Longitude: 118.7, Latitude: 31.9, POIID: "p1", POIName: "P", Province: "Z"},
 		Images:       []PublishImage{{Filename: "a.png", ContentType: "image/png", Data: png1}},
-		BeforePublish: func(context.Context) error {
+		BeforePublish: func(waitCtx context.Context) error {
+			// _, hasDeadline 验证节流等待没有继承最终发布网络请求的截止时间。
+			if _, hasDeadline := waitCtx.Deadline(); hasDeadline {
+				t.Error("节流等待错误继承最终发布网络截止时间")
+			}
 			if !uploadFinished {
 				t.Fatal("最终发布前图片尚未上传完成")
 			}

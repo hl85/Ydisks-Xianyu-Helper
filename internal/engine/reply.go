@@ -8,12 +8,14 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/xianyu/ws"
 )
 
 // ReplyResult 回复结果。
@@ -35,6 +37,9 @@ type AIPriceQuoteProposal struct {
 
 // aiQuoteValidity 是 AI 报价从成功发送开始允许自动应用到新订单的时长。
 const aiQuoteValidity = 30 * time.Minute
+
+// replyRecordPersistTimeout 是发送结果不确定时写入隔离状态允许使用的最长时间。
+const replyRecordPersistTimeout = 5 * time.Second
 
 // APIReplier 外部 API 回复（优先级1）。返回 nil 表示无回复。
 type APIReplier interface {
@@ -126,13 +131,16 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 		if // err 用于本次流程后续判断的err
 		err := r.sender.SendImage(ctx, m.ChatID, m.SenderUserID, res.ImageURL, 0, 0, 0); err != nil {
 			r.logger.Error("发送回复图片失败", "err", err)
-			r.markReplyFailure(ctx, res, m, err)
+			// persistErr 保存确定未发送状态写入错误。
+			if persistErr := r.markReplyFailure(ctx, res, m, err); persistErr != nil {
+				return errors.Join(err, persistErr)
+			}
 			return err
 		}
 		if res.ReplyOnce && m.ChatID != "" {
 			if // err 用于本次流程后续判断的err
 			err := r.store.DefaultReps.MarkPartSent(ctx, r.cookieID, m.ChatID, "image"); err != nil {
-				r.markReplyFailure(ctx, res, m, err)
+				r.markReplyUncertain(ctx, res, m, err)
 				return err
 			}
 		}
@@ -141,13 +149,16 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 		if // err 用于本次流程后续判断的err
 		err := r.sender.SendText(ctx, m.ChatID, m.SenderUserID, res.Text); err != nil {
 			r.logger.Error("发送回复文本失败", "err", err)
-			r.markReplyFailure(ctx, res, m, err)
+			// persistErr 保存确定未发送状态写入错误。
+			if persistErr := r.markReplyFailure(ctx, res, m, err); persistErr != nil {
+				return errors.Join(err, persistErr)
+			}
 			return err
 		}
 		if res.ReplyOnce && m.ChatID != "" {
 			if // err 用于本次流程后续判断的err
 			err := r.store.DefaultReps.MarkPartSent(ctx, r.cookieID, m.ChatID, "text"); err != nil {
-				r.markReplyFailure(ctx, res, m, err)
+				r.markReplyUncertain(ctx, res, m, err)
 				return err
 			}
 		}
@@ -165,17 +176,43 @@ func (r *ReplyService) Handle(ctx context.Context, m ChatMessage) error {
 	if res.ReplyOnce && m.ChatID != "" {
 		if // err 用于本次流程后续判断的err
 		err := r.store.DefaultReps.MarkRecordSent(ctx, r.cookieID, m.ChatID); err != nil {
-			r.markReplyFailure(ctx, res, m, err)
+			r.markReplyUncertain(ctx, res, m, err)
 			return err
 		}
 	}
 	return nil
 }
 
-// markReplyFailure 封装mark回复Failure业务协调。
-func (r *ReplyService) markReplyFailure(ctx context.Context, res *ReplyResult, m ChatMessage, sendErr error) {
+// markReplyFailure 持久化确定未发送的默认回复失败状态，并反馈状态写入错误。
+func (r *ReplyService) markReplyFailure(ctx context.Context, res *ReplyResult, m ChatMessage, sendErr error) error {
 	if res.ReplyOnce && m.ChatID != "" {
-		_ = r.store.DefaultReps.MarkRecordFailed(ctx, r.cookieID, m.ChatID, sendErr.Error())
+		// transportErr 只接受聊天传输层明确声明的未知发送结果；普通本地错误仍允许重试。
+		var transportErr *ws.SendError
+		if errors.As(sendErr, &transportErr) && ws.SendResultKind(sendErr) == ws.SendUncertain {
+			r.markReplyUncertain(ctx, res, m, sendErr)
+			return nil
+		}
+		// persistCtx 使用独立的短超时，保证发送方取消上下文不会遗留不可领取的 sending 状态。
+		persistCtx, cancel := context.WithTimeout(context.Background(), replyRecordPersistTimeout)
+		defer cancel()
+		// persistErr 保存确定未发送状态写入结果。
+		if persistErr := r.store.DefaultReps.MarkRecordFailed(persistCtx, r.cookieID, m.ChatID, sendErr.Error()); persistErr != nil {
+			return fmt.Errorf("保存默认回复失败状态: %w", persistErr)
+		}
+	}
+	return nil
+}
+
+// markReplyUncertain 在消息已经可能送达后本地状态写入失败时隔离一次性默认回复。
+func (r *ReplyService) markReplyUncertain(ctx context.Context, res *ReplyResult, m ChatMessage, cause error) {
+	if res.ReplyOnce && m.ChatID != "" {
+		// persistCtx 让取消的发送上下文不会阻止未知结果进入隔离状态。
+		persistCtx, cancel := context.WithTimeout(context.Background(), replyRecordPersistTimeout)
+		defer cancel()
+		// persistErr 保存未知投递结果隔离失败，便于运维发现无法持久化的人工核对状态。
+		if persistErr := r.store.DefaultReps.MarkRecordUncertain(persistCtx, r.cookieID, m.ChatID, cause.Error()); persistErr != nil {
+			r.logger.Error("隔离未知默认回复结果失败", "err", persistErr)
+		}
 	}
 }
 

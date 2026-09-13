@@ -327,7 +327,7 @@ func TestSplitExternalTargetURLDoesNotEchoSecrets(t *testing.T) {
 	}
 }
 
-// TestMultiDB_CookiesUpsertBool 验证 cookie UPSERT + auto_confirm 布尔读写跨三库一致。
+// TestMultiDB_CookiesUpsertBool 验证 cookie UPSERT 及两个自动化开关的布尔读写跨三库一致。
 func TestMultiDB_CookiesUpsertBool(t *testing.T) {
 	// tg 表示当前遍历过程中的tg
 	for _, tg := range allTestTargets(t) {
@@ -365,6 +365,21 @@ func TestMultiDB_CookiesUpsertBool(t *testing.T) {
 			// auto_confirm 默认 true，关闭后读 false。
 			if enabled, err := s.Cookies.GetAutoConfirm(ctx, cid); err != nil || !enabled {
 				t.Fatalf("default auto_confirm=%v err=%v want true", enabled, err)
+			}
+			// consignEnabled、consignErr 验证三方言新增开关的默认关闭语义。
+			consignEnabled, consignErr := s.Cookies.GetAutoConsign(ctx, cid)
+			if consignErr != nil || consignEnabled {
+				t.Fatalf("default auto_consign=%v err=%v want false", consignEnabled, consignErr)
+			}
+			// autoConsignUpdate 验证三方言账号设置更新可以开启平台确认发货动作。
+			autoConsignUpdate := true
+			// updateErr 表示当前数据库方言写入自动确认发货开关时的错误。
+			if _, updateErr := s.Cookies.UpdateSettings(ctx, cid, AccountSettingsUpdate{UserID: user.ID, AutoConsign: &autoConsignUpdate}); updateErr != nil {
+				t.Fatalf("enable auto_consign: %v", updateErr)
+			}
+			// consignEnabled、consignErr 验证显式开启后能从当前数据库方言读回新开关。
+			if consignEnabled, consignErr := s.Cookies.GetAutoConsign(ctx, cid); consignErr != nil || !consignEnabled {
+				t.Fatalf("enabled auto_consign=%v err=%v want true", consignEnabled, consignErr)
 			}
 			if // err 用于本次流程后续判断的err
 			_, err := s.DB.ExecContext(ctx,

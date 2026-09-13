@@ -300,12 +300,30 @@ func (catalog chatItemCatalog) ListChatItems(ctx context.Context, accountID, cha
 // persistCookieSession 在平台调用后重新加锁复核凭证指纹，只提交基于同一快照产生的 Cookie 变化。
 // 第二个返回值表示完整凭证状态已经写入，调用方即使拿到空或未变化的扁平值也必须让运行时复读数据库元数据。
 func (catalog chatItemCatalog) persistCookieSession(ctx context.Context, initial db.CookiePlatformRuntimeData, session *mtop.CookieSession, result *mtop.ChatItemPage) (string, bool, error) {
+	// updatedCookies 保存旧版商品查询接口可能单独返回的扁平 Cookie。
+	updatedCookies := ""
+	if result != nil {
+		updatedCookies = result.UpdatedCookies
+	}
+	return catalog.credentials.persistCookieSession(ctx, initial, session, updatedCookies)
+}
+
+// persistCookieSession 在平台调用后重新加锁复核凭证指纹，只提交基于同一快照产生的 Cookie 变化。
+// updatedCookies 仅用于兼容不提供完整会话快照的旧平台客户端。
+func (repository chatCredentialRepository) persistCookieSession(ctx context.Context, initial db.CookiePlatformRuntimeData, session *mtop.CookieSession, updatedCookies string) (string, bool, error) {
 	// unlock 保护最新凭证复核和条件写回，锁内不执行平台 I/O。
-	unlock := catalog.credentials.store.LockAccountCredentials(initial.ID)
+	if repository.store == nil || repository.store.Cookies == nil {
+		return "", false, chatapp.ErrUnavailable
+	}
+	// unlock 保护最新凭证复核和条件写回，锁内不执行平台 I/O。
+	unlock := repository.store.LockAccountCredentials(initial.ID)
 	defer unlock()
 	// latest 和 loadErr 是平台调用结束后的当前凭证视图。
-	latest, loadErr := catalog.credentials.store.Cookies.GetCookiePlatformRuntimeData(ctx, initial.ID)
-	if loadErr != nil || latest.UserID != initial.UserID || latest.Value != initial.Value || latest.MetadataJSON != initial.MetadataJSON {
+	latest, loadErr := repository.store.Cookies.GetCookiePlatformRuntimeData(ctx, initial.ID)
+	if loadErr != nil {
+		return "", false, fmt.Errorf("读取聊天商品凭证失败: %w", loadErr)
+	}
+	if latest.UserID != initial.UserID || latest.Value != initial.Value || latest.MetadataJSON != initial.MetadataJSON {
 		return "", false, errors.New("账号凭证已变化，请重试")
 	}
 	if session != nil {
@@ -318,7 +336,7 @@ func (catalog chatItemCatalog) persistCookieSession(ctx context.Context, initial
 				metadata = cookierefresh.MetadataWithSnapshot(latest.MetadataJSON, snapshot)
 			}
 			// persistErr 是完整 Cookie 会话发生变化时的条件持久化结果。
-			if persistErr := catalog.credentials.store.Cookies.UpdateRenewalCookie(ctx, latest.ID, value, metadata, time.Now().Unix()); persistErr != nil {
+			if persistErr := repository.store.Cookies.UpdateRenewalCookie(ctx, latest.ID, value, metadata, time.Now().Unix()); persistErr != nil {
 				return "", false, fmt.Errorf("保存聊天商品查询响应 Cookie: %w", persistErr)
 			}
 			return value, true, nil
@@ -327,14 +345,14 @@ func (catalog chatItemCatalog) persistCookieSession(ctx context.Context, initial
 			return "", false, nil
 		}
 	}
-	if result != nil && strings.TrimSpace(result.UpdatedCookies) != "" && result.UpdatedCookies != latest.Value {
+	if strings.TrimSpace(updatedCookies) != "" && updatedCookies != latest.Value {
 		// metadata 去除可能损坏或不完整的历史快照；平面兼容响应不能冒充完整 Cookie Jar。
 		metadata := cookierefresh.MetadataWithoutSnapshot(latest.MetadataJSON)
 		// persistErr 是兼容旧 MTOP 客户端平面 Cookie 响应的持久化结果。
-		if persistErr := catalog.credentials.store.Cookies.UpdateRenewalCookie(ctx, latest.ID, result.UpdatedCookies, metadata, time.Now().Unix()); persistErr != nil {
+		if persistErr := repository.store.Cookies.UpdateRenewalCookie(ctx, latest.ID, updatedCookies, metadata, time.Now().Unix()); persistErr != nil {
 			return "", false, fmt.Errorf("保存聊天商品查询响应 Cookie: %w", persistErr)
 		}
-		return result.UpdatedCookies, true, nil
+		return updatedCookies, true, nil
 	}
 	return "", false, nil
 }
@@ -392,14 +410,24 @@ func NewChatImageUploader(store *db.Store, clientProvider func() mtop.Client, ma
 
 // UploadChatImage 在适配器内部读取和刷新凭证，只向应用层返回图片地址。
 func (u chatImageUploader) UploadChatImage(ctx context.Context, accountID, filename, contentType string, data []byte) (chatapp.ImageUpload, error) {
-	if u.clientProvider == nil {
+	if u.clientProvider == nil || u.credentials.store == nil || u.credentials.store.Cookies == nil {
 		return chatapp.ImageUpload{}, chatapp.ErrUnavailable
 	}
-	// cookieValue 和 err 保存平台调用所需的短暂明文凭证及读取错误，不得离开适配器。
-	cookieValue, err := u.credentials.getCookieValue(ctx, accountID)
-	if err != nil {
-		return chatapp.ImageUpload{}, err
+	// credentialUnlock 保护请求前凭证快照读取；平台 I/O 开始前必须释放。
+	credentialUnlock := u.credentials.store.LockAccountCredentials(accountID)
+	// initial 和 credentialErr 保存本次平台请求使用的凭证与元数据快照，不得写入日志或响应。
+	initial, credentialErr := u.credentials.store.Cookies.GetCookiePlatformRuntimeData(ctx, accountID)
+	if credentialErr != nil {
+		credentialUnlock()
+		return chatapp.ImageUpload{}, credentialErr
 	}
+	if !hasStoredCredential(initial) {
+		credentialUnlock()
+		return chatapp.ImageUpload{}, errors.New("账号凭证不可用")
+	}
+	// requestContext 和 cookieSession 保存支持完整 Cookie Jar 更新的请求上下文与会话。
+	requestContext, cookieSession := withCookieSnapshot(ctx, initial)
+	credentialUnlock()
 	// client 保存当前可用的 MTOP 客户端。
 	client := u.clientProvider()
 	// uploader、ok 保存 MTOP 图片上传能力及接口支持情况。
@@ -409,25 +437,24 @@ func (u chatImageUploader) UploadChatImage(ctx context.Context, accountID, filen
 	if !ok {
 		return chatapp.ImageUpload{}, chatapp.ErrUnavailable
 	}
-	// upload、err 保存图片平台返回结果及调用错误。
-	upload, err := uploader.UploadChatImage(ctx, cookieValue, filename, contentType, data)
-	if err != nil {
-		return chatapp.ImageUpload{}, err
+	// upload、uploadErr 保存图片平台返回结果及调用错误。
+	upload, uploadErr := uploader.UploadChatImage(requestContext, initial.Value, filename, contentType, data)
+	if uploadErr != nil {
+		return chatapp.ImageUpload{}, uploadErr
 	}
 	if upload == nil {
 		return chatapp.ImageUpload{}, chatapp.ErrSend
 	}
-	if upload.UpdatedCookies != "" && upload.UpdatedCookies != cookieValue {
-		// persistErr 保存刷新凭证的持久化错误；该错误必须反馈给调用方，避免静默丢失会话状态。
-		if persistErr := u.credentials.updateCookieValue(ctx, accountID, upload.UpdatedCookies); persistErr != nil {
-			return chatapp.ImageUpload{}, persistErr
-		}
-		if u.manager != nil {
-			// sender、senderOK 保存刷新凭证同步到运行时的结果。
-			sender, senderOK := u.manager.GetInstance(accountID)
-			if senderOK && sender != nil {
-				sender.UpdateCookie(upload.UpdatedCookies)
-			}
+	// runtimeCookie、syncRuntime 和 persistErr 是通过凭证指纹复核后允许同步到在线实例的 Cookie、同步标记及写回错误。
+	runtimeCookie, syncRuntime, persistErr := u.credentials.persistCookieSession(ctx, initial, cookieSession, upload.UpdatedCookies)
+	if persistErr != nil {
+		return chatapp.ImageUpload{}, persistErr
+	}
+	if syncRuntime && u.manager != nil {
+		// sender、senderOK 保存刷新凭证同步到运行时的结果。
+		sender, senderOK := u.manager.GetInstance(accountID)
+		if senderOK && sender != nil {
+			sender.UpdateCookie(runtimeCookie)
 		}
 	}
 	return chatapp.ImageUpload{URL: upload.URL, Width: upload.Width, Height: upload.Height}, nil

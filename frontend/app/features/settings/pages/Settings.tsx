@@ -69,7 +69,7 @@ const Settings: React.FC = () => {
       {saveError && (
         <div className="flex items-center justify-between gap-3 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
           <span>{saveError}</span>
-          <button type="button" className="font-bold underline" onClick={/* 当前回调处理用户交互或异步状态变化。 */ () => void handleSave}>重试保存</button>
+          <button type="button" className="font-bold underline" onClick={/* 当前回调处理用户交互或异步状态变化。 */ () => void handleSave()}>重试保存</button>
         </div>
       )}
 

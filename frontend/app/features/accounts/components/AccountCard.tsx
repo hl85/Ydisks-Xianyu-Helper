@@ -83,7 +83,7 @@ export const AccountCard = React.memo(/* AccountCard 负责渲染单个账号卡
                 <Sparkles className="h-3 w-3" /> 每日擦亮
               </span>
             )}
-            {account.auto_confirm && <span className="flex items-center gap-1 rounded-lg bg-blue-50 px-2.5 py-0.5 text-xs font-bold text-blue-700"><Check className="h-3 w-3" /> 自动确认发货</span>}
+            {account.auto_confirm && <span className="flex items-center gap-1 rounded-lg bg-blue-50 px-2.5 py-0.5 text-xs font-bold text-blue-700"><Check className="h-3 w-3" /> 自动发货</span>}
             {account.profile_error && (
               <span className="px-2.5 py-0.5 rounded-lg bg-amber-100 text-amber-700 text-xs font-bold flex items-center gap-1" title={account.profile_error}>
                 <AlertCircle className="w-3 h-3" /> 资料未同步

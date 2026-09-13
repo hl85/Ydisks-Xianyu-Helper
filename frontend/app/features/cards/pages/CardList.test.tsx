@@ -122,7 +122,7 @@ describe('CardList 页面组合行为', /* 当前回调验证卡密筛选、批�
     fireEvent.click(screen.getAllByTitle('编辑')[0]);
     fireEvent.change(screen.getByDisplayValue('库存一'), { target: { value: '库存更新' } });
     fireEvent.click(screen.getByText('保存更改'));
-    await waitFor(/* editAssertion 等待卡密更新请求完成。 */ () => expect(cardListMocks.updateCard).toHaveBeenCalledWith(1, expect.objectContaining({ name: '库存更新', data_content: 'A\nB' })));
+    await waitFor(/* editAssertion 等待卡密更新请求完成。 */ () => expect(cardListMocks.updateCard).toHaveBeenCalledWith(1, expect.objectContaining({ name: '库存更新' })));
     expect(cardListMocks.loadCards).toHaveBeenCalledTimes(2);
   });
 
