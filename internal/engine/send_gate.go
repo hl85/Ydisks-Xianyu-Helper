@@ -12,6 +12,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math/rand/v2"
 	"os"
 	"strconv"
@@ -37,6 +38,8 @@ const (
 	sendGateDefaultJitter = 1 * time.Second
 	// sendGateMaxWait 是单次发送允许等待的上限；超过它说明配置过于保守，按上限等待以免拖死调用链。
 	sendGateMaxWait = 30 * time.Second
+	// sendCounterRestoreTimeout 是构造期从 DB 恢复当日计数的有限收口预算。
+	sendCounterRestoreTimeout = 5 * time.Second
 )
 
 // ErrSendGateDailyLimit 表示账号当日发送额度已用尽，需要等到次日或由人工提高额度。
@@ -44,6 +47,15 @@ var ErrSendGateDailyLimit = errors.New("账号当日发送额度已用尽")
 
 // ErrSendGateQuietHours 表示当前处于配置的静默时段；本次发送被拒绝，而不是原地等待数小时。
 var ErrSendGateQuietHours = errors.New("当前处于发送静默时段")
+
+// SendCounterPersistence 是发送闸门对计数持久化的最小使用方接口；
+// 由使用方（如 *db.SendCounterStore）隐式实现，engine 不依赖具体存储类型。
+type SendCounterPersistence interface {
+	// GetSendCount 读取指定账号在指定自然日已登记的发送条数；无记录返回 0。
+	GetSendCount(ctx context.Context, cookieID, day string) (int, error)
+	// AddSendCount 在指定账号指定自然日累加 delta 条，并返回累加后的总条数。
+	AddSendCount(ctx context.Context, cookieID, day string, delta int) (int64, error)
+}
 
 // sendGateConfig 描述一个账号的发送闸门参数；全零配置表示闸门完全关闭。
 type sendGateConfig struct {
@@ -99,6 +111,68 @@ type sendGate struct {
 	sentToday int
 	// lastSentAt 是上一次登记发送的时刻，用于推算下一次最早可发送时间。
 	lastSentAt time.Time
+	// persist 是可选的发送计数持久化仓储；为空时闸门退化为纯内存日额度。
+	persist SendCounterPersistence
+	// cookieID 是当前账号标识，与 day 一起构成持久化计数键；由接线方在构造后注入。
+	cookieID string
+	// logger 用于记录写穿与恢复失败的告警；为空时静默降级。
+	logger *slog.Logger
+	// global 是进程级共享的全局日发送预算；为空表示不启用全局额度。
+	// 锁序约束：gate.mu 与 global.mu 永不嵌套持有，总是先解锁前者再进入后者。
+	global *SendBudget
+}
+
+// attachPersistence 为闸门接入计数持久化，并按 (cookieID, 今天) 从 DB 恢复内存计数。
+// 恢复取内存与 DB 的较大值：进程重启后内存从零重新累积，若 DB 已有更高用量必须继承，
+// 防止重启成为绕过日额度的漏洞。恢复失败只告警，不阻断账号启动（fail-open）。
+// ctx 是恢复读取的取消边界；global 预算的接入由独立方法完成，保持本方法只管账号桶。
+func (g *sendGate) attachPersistence(ctx context.Context, persist SendCounterPersistence, cookieID string, logger *slog.Logger) {
+	// now 取当前时刻使用的取时实现；与 acquire 保持同一缺省策略。
+	now := g.now
+	if now == nil {
+		now = time.Now
+	}
+	g.persist = persist
+	g.cookieID = cookieID
+	g.logger = logger
+	if persist == nil {
+		return
+	}
+	// today 是本次恢复对应的目标自然日；只恢复当天，历史桶不进内存。
+	today := now().Format("2006-01-02")
+	// dbCount、err 是 DB 中今日已登记条数与读取错误。
+	dbCount, err := persist.GetSendCount(ctx, cookieID, today)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("恢复发送计数失败，本次启动按纯内存额度运行", "account", cookieID, "day", today, "err", err)
+		}
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// 恢复期间内存计数仍为构造初值；仅当 DB 更高时抬升，避免缩小任何已消耗的额度。
+	if g.day == "" {
+		g.day = today
+	}
+	if dbCount > g.sentToday {
+		g.sentToday = dbCount
+	}
+}
+
+// writeThrough 把本次已登记的账号发送写穿到持久化计数；I/O 必须在闸门锁外执行。
+// 写入失败只记录告警，不阻断发送：持久化缺位时行为退化为纯内存日额度。
+func (g *sendGate) writeThrough(ctx context.Context, day string) {
+	// persist 是本次写穿使用的仓储快照；未接线时无事可做。
+	persist := g.persist
+	if persist == nil {
+		return
+	}
+	// total、err 是累加后的总条数与写穿错误；total 暂不消费，保留给诊断日志。
+	if _, err := persist.AddSendCount(ctx, g.cookieID, day, 1); err != nil {
+		if g.logger != nil {
+			g.logger.Warn("发送计数写穿失败，退化为纯内存日额度", "account", g.cookieID, "day", day, "err", err)
+		}
+	}
 }
 
 // newSendGate 按给定配置构造闸门，并使用生产实现填充取时、等待与抖动三个注入点。
@@ -107,10 +181,11 @@ func newSendGate(cfg sendGateConfig) *sendGate {
 }
 
 // acquire 在需要时等待，使本次出站发送符合配置的静默时段、日额度与最小间隔约束。
+// 接入全局预算后，即使账号级配置全零也会占用全局槽并写穿账号计数。
 // ctx 是调用方的取消边界；返回错误表示本次发送被拒绝，调用方应把它当作「确定未发送」处理。
 func (g *sendGate) acquire(ctx context.Context) error {
-	// 未装配的闸门（例如测试中直接构造的协调器）不施加任何限制。
-	if g == nil || !g.cfg.enabled() {
+	// 未装配的闸门（例如测试中直接构造的协调器）不施加任何限制；接入全局预算后仍需继续走占用路径。
+	if g == nil || (!g.cfg.enabled() && g.global == nil) {
 		return nil
 	}
 	// now 是本次调用的取时实现；缺省时回落到生产实现，保证零值以外路径也安全。
@@ -158,10 +233,38 @@ func (g *sendGate) acquire(ctx context.Context) error {
 		wait = sendGateMaxWait
 	}
 	// 先占位再放锁：并发调用会依次排到各自的时间片，而不是同时醒来后一起抢跑。
+	// prevLast、prevSent 是占位前的登记快照，供全局额度拒绝时回滚账号槽。
+	prevLast, prevSent := g.lastSentAt, g.sentToday
 	g.lastSentAt = current.Add(wait)
 	g.sentToday++
+	// reservedSent 是占位后的当日计数；回滚时据此判断占用是否已被并发推进覆盖。
+	reservedSent := g.sentToday
 	g.mu.Unlock()
+	// 先账号后全局：账号槽已占用；全局额度拒绝时必须回滚账号槽，否则会凭空消耗账号日额度。
+	if g.global != nil {
+		// globalErr 是全局预算的占用结果；拒绝语义与账号额度一致，归入「确定未发送」。
+		if _, globalErr := g.global.acquire(ctx); globalErr != nil {
+			g.rollbackReservation(today, prevSent, prevLast, reservedSent)
+			return globalErr
+		}
+	}
+	// 写穿在锁外执行：闸门临界区不做 I/O；写穿失败只告警，行为退化为纯内存额度。
+	g.writeThrough(ctx, today)
 	return sleep(ctx, wait)
+}
+
+// rollbackReservation 在全局额度拒绝时归还已占用的账号发送槽。
+// 仅当当日与计数未被并发推进时才回滚，避免覆盖其他并发发送的登记；
+// lastSentAt 一并还原，使一次被拒绝的发送不会拖慢后续发送节奏。
+func (g *sendGate) rollbackReservation(day string, prevSent int, prevLast time.Time, reservedSent int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// 当日已切换或计数已被并发推进时放弃回滚，宁可少退不可错退。
+	if g.day != day || g.sentToday != reservedSent {
+		return
+	}
+	g.sentToday = prevSent
+	g.lastSentAt = prevLast
 }
 
 // inQuietHours 判断给定时刻是否落在配置的静默时段内；时段允许跨越午夜。

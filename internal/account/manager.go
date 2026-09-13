@@ -31,6 +31,9 @@ type Manager struct {
 	logger  *slog.Logger
 	// reviewNotifier 是 AI 回复人工确认通知器，可选；nil 时账号运行时只拦截发送、不发确认通知。
 	reviewNotifier engine.ReplyReviewNotifier
+	// globalBudget 是进程级共享的全局日发送预算，由 NewManager 创建一次并注入每个账号闸门。
+	// 归 Manager 持有至进程关停，自身无独立关停路径；锁与生命周期文档见 engine.SendBudget。
+	globalBudget *engine.SendBudget
 
 	mu       sync.Mutex
 	accounts map[string]*managedAccount
@@ -62,11 +65,23 @@ func NewManager(store *db.Store, handler engine.Handler, logger *slog.Logger, re
 	if len(reviewNotifiers) > 0 {
 		reviewNotifier = reviewNotifiers[0]
 	}
+	// globalBudget 是进程级共享的全局日发送预算，额度来自环境变量 XIANYU_GLOBAL_SEND_DAILY_LIMIT（0=不限）。
+	// store 可用时接入全局桶持久化并恢复今日用量；恢复失败按纯内存预算运行（fail-open）。
+	var globalBudget *engine.SendBudget
+	if store != nil {
+		globalBudget = engine.NewSendBudgetFromEnv(store.SendCounters, logger)
+		// restoreCtx 是构造期恢复读取的有限收口预算；NewManager 无 owner Context 可继承，
+		// 按架构门禁要求显式限时，防止恢复读取无限等待阻塞管理器构造。
+		restoreCtx, restoreCancel := context.WithTimeout(context.Background(), engine.SendBudgetRestoreTimeout)
+		defer restoreCancel()
+		globalBudget.Restore(restoreCtx)
+	}
 	return &Manager{
 		store:          store,
 		handler:        handler,
 		logger:         logger,
 		reviewNotifier: reviewNotifier,
+		globalBudget:   globalBudget,
 		accounts:       make(map[string]*managedAccount),
 		stopping:       make(map[string]struct{}),
 	}
@@ -146,6 +161,8 @@ func (m *Manager) Start(ctx context.Context, cookieID, cookieValue string) error
 		Logger:    m.logger,
 		// 透传 AI 回复人工确认通知器；未注入时为 nil，账号运行时按无通知降级。
 		ReplyReviewNotifier: m.reviewNotifier,
+		// 透传进程级全局日发送预算；未启用全局额度时为 nil，闸门按无全局额度降级。
+		GlobalBudget: m.globalBudget,
 	})
 	// accCtx、cancel 用于本次流程后续判断的accCtx、cancel
 	accCtx, cancel := context.WithCancel(ctx)

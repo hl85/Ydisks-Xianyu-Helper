@@ -312,6 +312,8 @@ type Config struct {
 	SendGate *sendGateConfig
 	// ReplyReviewNotifier 可选：AI 回复人工确认通知器；nil 时确认通知静默跳过，仅拦截发送。
 	ReplyReviewNotifier ReplyReviewNotifier
+	// GlobalBudget 可选：多账号共享的全局日发送预算；nil 表示不启用全局额度。
+	GlobalBudget *SendBudget
 }
 
 // New 构造单账号运行时（未启动）。
@@ -383,13 +385,25 @@ func New(cfg Config) *Account {
 	})
 	// connection 保存绑定当前账号 facade 的连接编排组件；它只在构造完成后才可被 Run 调用。
 	a.connection = connectionCoordinator{account: a}
-	// gateConfig 是本次装配使用的发送闸门参数：显式配置优先，否则采用环境变量解析出的默认值。
+	// gate 是本次装配的账号发送闸门：显式配置优先，否则采用环境变量解析出的默认值。
+	// gateConfig 是本次装配使用的发送闸门参数；两者分离是为了持久化接线仍能拿到最终配置。
 	gateConfig := sendGateConfigFromEnv()
 	if cfg.SendGate != nil {
 		gateConfig = *cfg.SendGate
 	}
+	// gate 是本次装配的账号发送闸门实例；store 可用时接入计数持久化并恢复今日用量。
+	gate := newSendGate(gateConfig)
+	// 接入进程级全局日发送预算；为空表示不启用，账号闸门退化为仅账号级限制。
+	gate.global = cfg.GlobalBudget
+	if cfg.Store != nil && cfg.Store.SendCounters != nil {
+		// restoreCtx 是启动期恢复读取的有限收口预算；构造阶段无 owner Context 可继承，
+		// 按架构门禁要求显式限时，防止恢复读取无限等待阻塞账号构造。
+		restoreCtx, restoreCancel := context.WithTimeout(context.Background(), sendCounterRestoreTimeout)
+		defer restoreCancel()
+		gate.attachPersistence(restoreCtx, cfg.Store.SendCounters, cfg.CookieID, logger)
+	}
 	// outgoing 保存绑定当前账号 facade 的出站消息协调器；它只读取连接快照后执行外部 I/O。
-	a.outgoing = outgoingMessageCoordinator{account: a, echoTracker: echoTracker, gate: newSendGate(gateConfig)}
+	a.outgoing = outgoingMessageCoordinator{account: a, echoTracker: echoTracker, gate: gate}
 	// credentials 保存绑定当前账号 facade 的凭证协调器；外部凭证 I/O 均由它控制锁边界。
 	a.credentials = credentialCoordinator{account: a}
 	return a
