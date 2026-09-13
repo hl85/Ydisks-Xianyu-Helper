@@ -333,6 +333,33 @@ npm --prefix frontend run test:coverage
 - 禁止改冻结的验证码行为。
 - 保留工作区中无关的改动。
 
+### 2.4 核心链路回归门槛
+
+- 任何代码改动提交前必须回归受影响包的单元测试。
+- 改完 Go 代码必须重跑受影响包测试并出具覆盖率。
+- 核心链路文件清单与例外登记在 docs/architecture/core-chain-coverage.md。
+- 核心链路文件改动后，该文件语句覆盖率必须回到 100%。
+- 核心链路新增代码必须与测试同批提交，禁止先提交后补测。
+- 修缺陷必须先写一条能复现该缺陷的失败测试。
+- 修复后该测试必须转绿并永久保留为回归用例。
+- 覆盖率统计必须显式列出核心链路的全部包。
+- 新增跨包调用时必须把被调包加入统计范围。
+- 核心链路覆盖率回落即视为门禁失败，禁止合并。
+- 无法覆盖的分支必须在清单登记例外并写明原因。
+- 例外只允许可证明不可达、仅外部环境、真实平台账号三类。
+- 每条例外写明文件、行号、原因与最近复查日期。
+- 回归证据必须含命令、执行环境与各包语句百分比。
+- 禁止用 t.Skip、build tag 或缩小断言来满足门槛。
+- 禁止把生产代码标记为忽略或从统计中排除。
+
+```bash
+# 核心链路覆盖率（容器内；必须显式列出全部链路包，否则跨包覆盖不会被统计）
+"$DOCKER" run --rm -v "$REPO":/src -w /src -v ydisks-gomod:/go/pkg/mod \
+  golang:1.26 sh -c 'go test -coverprofile=cover-core.out \
+    ./internal/automation ./internal/engine ./internal/adapter ./internal/db ./internal/xianyu/ws \
+    && go tool cover -func=cover-core.out | tail -1'
+```
+
 ---
 
 ## 3. 提交与评审
