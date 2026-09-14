@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -442,5 +443,104 @@ func TestAIReplyTracksBargainRoundsAndBlocksUnsafePrice(t *testing.T) {
 	history, err := s.AIReply.ConversationHistory(ctx, "cid", "chat1", "item1", 10)
 	if err != nil || len(history) != 4 {
 		t.Fatalf("history len=%d err=%v", len(history), err)
+	}
+}
+
+// TestAIReplyWritesRealIntent 验证写入对话历史的意图是注册表判定的真实意图，
+// 而非旧逻辑硬编码的 bargain/chat：单命中写该意图，多命中归并为 ambiguous。
+func TestAIReplyWritesRealIntent(t *testing.T) {
+	// s、cleanup 保存测试数据库及清理函数。
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	// ctx 是本次测试共用的上下文。
+	ctx := context.Background()
+	// srv 是返回固定文本的本地模型桩。
+	srv := mockOpenAIServer(t, 0, "可以优惠")
+	s.DB.ExecContext(ctx, `INSERT INTO ai_reply_settings (cookie_id, ai_enabled, custom_prompts) VALUES ('cid', 1, '')`)
+	s.Settings.Set(ctx, "ai_api_key", "sk-test")
+	s.Settings.Set(ctx, "ai_api_url", srv.URL)
+
+	// a 是待测的 AI 回复实现。
+	a := NewAIReplier("cid", s, nil)
+	// 单一切中砍价：历史用户意图应为 bargain。
+	if _, err := a.Reply(ctx, chatMsg("能便宜点吗", "item1", "chat1")); err != nil {
+		t.Fatalf("砍价应被处理: %v", err)
+	}
+	// history、err 是写入后的会话历史。
+	history, err := s.AIReply.ConversationHistory(ctx, "cid", "chat1", "item1", 10)
+	if err != nil || len(history) < 2 {
+		t.Fatalf("应写入用户+AI 两条: history=%+v err=%v", history, err)
+	}
+	if history[0].Intent != IntentBargain {
+		t.Fatalf("用户意图应为 bargain，实际 %q", history[0].Intent)
+	}
+
+	// 砍价叠加询价：多命中应归并为 ambiguous。
+	if _, err := a.Reply(ctx, chatMsg("最低多少钱，包邮吗", "item1", "chat2")); err != nil {
+		t.Fatalf("多意图砍价应被处理: %v", err)
+	}
+	// history2、err2 是第二轮会话历史。
+	history2, err2 := s.AIReply.ConversationHistory(ctx, "cid", "chat2", "item1", 10)
+	if err2 != nil || len(history2) < 2 {
+		t.Fatalf("应写入用户+AI 两条: history=%+v err=%v", history2, err2)
+	}
+	if history2[0].Intent != IntentAmbiguous {
+		t.Fatalf("多命中意图应为 ambiguous，实际 %q", history2[0].Intent)
+	}
+}
+
+// TestAIReplyExtendedComplaintKeywordIntercepts 验证设置 ai_complaint_keywords 后，
+// 新增投诉说法能不停机纳入拦截（与内置取并集），且非法正则被安全忽略不影响内置拦截。
+func TestAIReplyExtendedComplaintKeywordIntercepts(t *testing.T) {
+	// s、cleanup 保存测试数据库及清理函数。
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	// ctx 是本次测试共用的上下文。
+	ctx := context.Background()
+	// srv 是返回固定文本的本地模型桩。
+	srv := mockOpenAIServer(t, 0, "可以优惠")
+	s.DB.ExecContext(ctx, `INSERT INTO ai_reply_settings (cookie_id, ai_enabled, custom_prompts) VALUES ('cid', 1, '')`)
+	s.Settings.Set(ctx, "ai_api_key", "sk-test")
+	s.Settings.Set(ctx, "ai_api_url", srv.URL)
+
+	// a 是待测的 AI 回复实现。
+	a := NewAIReplier("cid", s, nil)
+	// probe 是同时含砍价与新增投诉说法的消息，用于证明扩展词表真的改变拦截。
+	probe := "货不对板，能便宜点吗"
+
+	// 未配置扩展词表时，该消息按砍价放行交给 AI。
+	if _, err := a.Reply(ctx, chatMsg(probe, "item1", "chat-base")); err != nil {
+		t.Fatalf("基线应放行: %v", err)
+	}
+	// 配置扩展词表（含非法正则 + 合法新说法），非法项应被忽略，合法项生效。
+	s.Settings.Set(ctx, "ai_complaint_keywords", "[非法( ; 货不对板")
+	// res、err 用于本次流程后续判断的res、err（验证扩展词表拦截生效）。
+	if res, err := a.Reply(ctx, chatMsg(probe, "item1", "chat-ext")); err != nil || res != nil {
+		t.Fatalf("扩展投诉词应拦截: res=%+v err=%v", res, err)
+	}
+	// 内置说法仍应拦截（证明并集而非替换，内置保护未被清空）。
+	if res, err := a.Reply(ctx, chatMsg("我要退款，能便宜点吗", "item1", "chat-builtin")); err != nil || res != nil {
+		t.Fatalf("内置投诉词应拦截: res=%+v err=%v", res, err)
+	}
+}
+
+// TestLoadComplaintKeywordsReadError 验证设置读取失败时返回错误，交由 Reply 记告警并回落内置词表，而非中断拦截。
+func TestLoadComplaintKeywordsReadError(t *testing.T) {
+	// s、cleanup 保存测试数据库及清理函数。
+	s, cleanup := newAIStore(t)
+	defer cleanup()
+	// closedDB 是已关闭的数据库连接，用于强制 Settings.Get 返回非 ErrNoRows 错误。
+	closedDB, openErr := sql.Open("sqlite", ":memory:")
+	if openErr != nil {
+		t.Fatalf("打开内存库失败: %v", openErr)
+	}
+	closedDB.Close()
+	// 用故障设置仓储覆盖默认仓储，仅本测试生效。
+	s.Settings = &db.SystemSettings{DB: closedDB, Dialect: db.DialectSQLite}
+	// a 是待测的 AI 回复实现。
+	a := NewAIReplier("cid", s, nil)
+	// 读取失败应返回错误（调用方据此回落内置词表，而非让投诉漏拦）。
+	if _, err := a.loadComplaintKeywords(context.Background()); err == nil {
+		t.Fatal("设置读取失败时应返回错误")
 	}
 }
