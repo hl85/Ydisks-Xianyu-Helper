@@ -503,11 +503,13 @@ func TestExecuteRuleSkipsWhenTriggerKeyMissing(t *testing.T) {
 	}, nil)
 	// task 既没有订单也没有更新键，无法构造幂等事件键。
 	task := Task{TriggerType: TriggerOrderPaid, AccountID: "nokey-acc"}
+	// skipErr 保存缺少事件键时的跳过结果；缺键必须安全跳过而不是报错。
 	if skipErr := coordinator.executeRule(ctx, task, *rule); skipErr != nil {
 		t.Fatalf("缺少事件键应安全跳过: %v", skipErr)
 	}
 	// runs 保存运行数量，必须为零。
 	var runs int
+	// countErr 保存统计自动化运行条数的查询错误。
 	if countErr := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM automation_runs`).Scan(&runs); countErr != nil {
 		t.Fatal(countErr)
 	}
@@ -628,6 +630,7 @@ func TestExecuteRuleReportsStaleSnapshotStorageFailure(t *testing.T) {
 	// task 携带指向既有运行的恢复快照，但存储已不可用。
 	task := Task{TriggerType: TriggerOrderPaid, AccountID: "snapshot-fail-acc", OrderID: "o-snapshot-fail",
 		Raw: map[string]any{"automation_run_id": int64(1), "automation_rule_id": ruleID}}
+	// runErr 保存恢复快照读取失败的结果；读取失败必须上抛，不能静默继续。
 	if runErr := coordinator.executeRule(ctx, task, *rule); runErr == nil {
 		t.Fatal("恢复快照读取失败应上抛错误")
 	}
@@ -820,6 +823,7 @@ func TestExecuteRuleSkipsStaleRunSnapshot(t *testing.T) {
 	// task 携带指向已隔离运行的恢复快照。
 	task := Task{TriggerType: TriggerOrderPaid, AccountID: "stale-acc", OrderID: "o-stale",
 		Raw: map[string]any{"automation_run_id": runID, "automation_rule_id": ruleID}}
+	// staleErr 保存非 running 快照的跳过结果；过期快照必须安全跳过而不是重复执行。
 	if staleErr := coordinator.executeRule(ctx, task, *rule); staleErr != nil {
 		t.Fatalf("非 running 快照应安全跳过: %v", staleErr)
 	}

@@ -25,7 +25,9 @@ func TestCanContinueAfterUncertainAction(t *testing.T) {
 		{name: "状态动作后仍有发卡", remaining: []db.AutomationAction{{ActionType: ActionConfirmShipment}, {ActionType: ActionSendCard}}, want: false},
 		{name: "含未知动作", remaining: []db.AutomationAction{{ActionType: "unknown_action"}}, want: false},
 	}
+	// tc 是当前待验证的用例，含剩余动作列表与期望的放行判定。
 	for _, tc := range cases {
+		// got 保存本次放行判定的实际结果，用于与用例期望值比对。
 		if got := canContinueAfterUncertainAction(tc.remaining); got != tc.want {
 			t.Errorf("%s: canContinueAfterUncertainAction=%v want %v", tc.name, got, tc.want)
 		}
