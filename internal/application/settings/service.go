@@ -5,7 +5,9 @@ package settings
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -417,8 +419,25 @@ func (s *Service) validateValues(values map[string]string) error {
 
 // validateSystemValue 校验具有运行时语义的普通系统设置，避免非法值落库或切换策略。
 func validateSystemValue(key, value string) error {
-	if key == "outbound_http_public_only" && !strings.EqualFold(strings.TrimSpace(value), "true") && !strings.EqualFold(strings.TrimSpace(value), "false") {
-		return errors.New("outbound_http_public_only 必须是布尔值")
+	// trimmed 是去除首尾空白后的待校验值，便于统一判断布尔与数字边界。
+	trimmed := strings.TrimSpace(value)
+	switch strings.TrimSpace(key) {
+	case "outbound_http_public_only":
+		if !strings.EqualFold(trimmed, "true") && !strings.EqualFold(trimmed, "false") {
+			return errors.New("outbound_http_public_only 必须是布尔值")
+		}
+	case "global_send_daily_limit", "silence_alert_minutes":
+		// n、err 是解析出的非负整数；负数或非法值拒绝落库，避免额度或阈值被悄悄重置或反向配置。
+		if n, err := strconv.Atoi(trimmed); err != nil || n < 0 {
+			return fmt.Errorf("%s 必须是非负整数", key)
+		}
+	case "ai_reply_review_mode":
+		// 允许的开关取值与 engine.reviewModeEnabled 保持一致；非法值拒绝落库。
+		switch strings.ToLower(trimmed) {
+		case "1", "true", "yes", "on", "enabled", "0", "false", "no", "off", "disabled", "":
+		default:
+			return errors.New("ai_reply_review_mode 必须是布尔开关值")
+		}
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -216,5 +217,82 @@ func TestSendBudgetFromEnv(t *testing.T) {
 	invalidBudget := NewSendBudgetFromEnv(persist, logger)
 	if invalidBudget.limit != 0 {
 		t.Fatalf("非法环境值应回落 0，实际 %d", invalidBudget.limit)
+	}
+}
+
+// 内存设置读取器：返回预置的键值或错误，用于验证数据库设置优先逻辑。
+type fakeSettingGetter struct {
+	// values 保存预置的系统设置键值。
+	values map[string]string
+	// err 是非空时统一返回该读取错误。
+	err error
+}
+
+// 让 fakeSettingGetter 满足 ResolveGlobalSendDailyLimit 的 getSetting 签名。
+func (f *fakeSettingGetter) get(ctx context.Context, key string) (string, error) {
+	// _ 显式忽略未使用的取消边界，保持接口签名一致。
+	_ = ctx
+	if f.err != nil {
+		return "", f.err
+	}
+	// v 是预置设置值；缺失返回空串表示未配置。
+	v, ok := f.values[key]
+	if !ok {
+		return "", nil
+	}
+	return v, nil
+}
+
+// TestResolveGlobalSendDailyLimit 验证读取优先级：设置命中 > 设置为空回落 env > 都为空回落默认 > 非法值回落默认。
+func TestResolveGlobalSendDailyLimit(t *testing.T) {
+	// cases 覆盖四种优先级分支，确保数据库配置真正压过环境变量。
+	cases := []struct {
+		// name 是当前用例名称。
+		name string
+		// setting 是数据库系统设置值；空串表示未配置。
+		setting string
+		// configured 表示是否预置数据库设置值。
+		configured bool
+		// env 是环境变量 XIANYU_GLOBAL_SEND_DAILY_LIMIT 的值；空串表示未设置。
+		env string
+		// expect 是期望解析出的额度。
+		expect int
+	}{
+		{name: "设置命中优先于环境变量", setting: "50", configured: true, env: "999", expect: 50},
+		{name: "设置为空回落到环境变量", setting: "", configured: true, env: "30", expect: 30},
+		{name: "设置与环境变量都为空回落默认不限", setting: "", configured: true, env: "", expect: 0},
+		{name: "设置非法值回落到环境变量", setting: "abc", configured: true, env: "25", expect: 25},
+		{name: "设置负值回落到环境变量", setting: "-7", configured: true, env: "25", expect: 25},
+		{name: "数据库读取失败回落到环境变量", setting: "50", configured: false, env: "40", expect: 40},
+	}
+	for // tc 表示当前遍历过程中的用例
+	_, tc := range cases {
+		// 快照避免闭包捕获循环变量，供子测试使用。
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			// getSetting 是注入的假设置读取函数；未配置时返回空串模拟缺席。
+			var getSetting func(context.Context, string) (string, error)
+			if tc.configured {
+				getSetting = func(_ context.Context, key string) (string, error) {
+					_ = key
+					return tc.setting, nil
+				}
+			} else {
+				// s 是模拟读取失败的假仓储。
+				s := &fakeSettingGetter{err: errors.New("db unavailable")}
+				getSetting = s.get
+			}
+			if tc.env != "" {
+				t.Setenv(sendGateGlobalDailyLimitEnv, tc.env)
+			} else {
+				// 清除环境变量，确保不污染旧值的回落结果。
+				t.Setenv(sendGateGlobalDailyLimitEnv, "")
+			}
+			// got 是解析出的额度。
+			got := ResolveGlobalSendDailyLimit(context.Background(), getSetting, os.Getenv)
+			if got != tc.expect {
+				t.Fatalf("用例 %q 额度应为 %d，实际 %d", tc.name, tc.expect, got)
+			}
+		})
 	}
 }

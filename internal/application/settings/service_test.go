@@ -616,3 +616,41 @@ func TestServicePropagatesSettingsPortErrors(t *testing.T) {
 }
 
 var _ ModelClient = (*modelClientFake)(nil)
+
+// TestValidateSystemValue 验证三项安全阀设置的写入校验分支。
+func TestValidateSystemValue(t *testing.T) {
+	// cases 覆盖数值与布尔开关的合法与非法取值，确保非法值被拒绝落库。
+	cases := []struct {
+		// name 是当前用例名称。
+		name string
+		// key 是待校验的设置键。
+		key string
+		// value 是待校验的设置值。
+		value string
+		// wantErr 表示期望是否返回校验错误。
+		wantErr bool
+	}{
+		{name: "全局额度合法", key: "global_send_daily_limit", value: "100", wantErr: false},
+		{name: "全局额度为零不限", key: "global_send_daily_limit", value: "0", wantErr: false},
+		{name: "全局额度非法文本", key: "global_send_daily_limit", value: "abc", wantErr: true},
+		{name: "全局额度负值", key: "global_send_daily_limit", value: "-5", wantErr: true},
+		{name: "静默阈值合法", key: "silence_alert_minutes", value: "90", wantErr: false},
+		{name: "静默阈值关闭", key: "silence_alert_minutes", value: "0", wantErr: false},
+		{name: "静默阈值非法", key: "silence_alert_minutes", value: "x", wantErr: true},
+		{name: "回复确认开启", key: "ai_reply_review_mode", value: "enabled", wantErr: false},
+		{name: "回复确认关闭", key: "ai_reply_review_mode", value: "false", wantErr: false},
+		{name: "回复确认空串", key: "ai_reply_review_mode", value: "", wantErr: false},
+		{name: "回复确认非法", key: "ai_reply_review_mode", value: "maybe", wantErr: true},
+		{name: "其它设置放行", key: "theme_color", value: "blue", wantErr: false},
+	}
+	for // tc 表示当前遍历过程中的用例
+	_, tc := range cases {
+		// err 是待校验设置的业务值校验结果。
+		err := validateSystemValue(tc.key, tc.value)
+		// gotErr 表示实际是否返回校验错误。
+		gotErr := err != nil
+		if gotErr != tc.wantErr {
+			t.Fatalf("%s: validateSystemValue(%q,%q) 错误=%v，期望 wantErr=%v", tc.name, tc.key, tc.value, err, tc.wantErr)
+		}
+	}
+}

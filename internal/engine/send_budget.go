@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,6 +23,27 @@ const sendGateGlobalDailyLimitEnv = "XIANYU_GLOBAL_SEND_DAILY_LIMIT"
 
 // SendBudgetRestoreTimeout 是构造期从 DB 恢复全局用量的有限收口预算，供外部接线方复用。
 const SendBudgetRestoreTimeout = 5 * time.Second
+
+// globalSendDailyLimitSetting 是数据库系统设置中保存多账号全局日发送额度的键；
+// 未配置时回落到环境变量 XIANYU_GLOBAL_SEND_DAILY_LIMIT，再回落到不限（0）。
+const globalSendDailyLimitSetting = "global_send_daily_limit"
+
+// ResolveGlobalSendDailyLimit 解析多账号全局日发送额度，优先级：数据库设置 > 环境变量 > 缺省不限（0）。
+// getSetting 从系统设置读取；为 nil 时跳过设置层直接读环境变量。getenv 读取环境变量。
+// 设置或环境变量非法（非非负整数）时按缺省不限处理，避免手滑配置悄悄关掉限额。
+func ResolveGlobalSendDailyLimit(ctx context.Context, getSetting func(context.Context, string) (string, error), getenv func(string) string) int {
+	if getSetting != nil {
+		// dbValue、dbErr 是数据库设置读取结果；读取成功且为合法非负整数时优先采用。
+		if dbValue, dbErr := getSetting(ctx, globalSendDailyLimitSetting); dbErr == nil {
+			// limit 是设置解析出的额度；合法即采用，保证界面配置优先于环境变量。
+			if limit, parseErr := strconv.Atoi(strings.TrimSpace(dbValue)); parseErr == nil && limit >= 0 {
+				return limit
+			}
+		}
+	}
+	// 设置缺失或非法时回落到环境变量，0 表示不限。
+	return envInt(sendGateGlobalDailyLimitEnv, 0)
+}
 
 // SendBudget 是多账号共享的进程级日发送预算。
 type SendBudget struct {

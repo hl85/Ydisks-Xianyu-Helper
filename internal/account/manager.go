@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -65,16 +66,23 @@ func NewManager(store *db.Store, handler engine.Handler, logger *slog.Logger, re
 	if len(reviewNotifiers) > 0 {
 		reviewNotifier = reviewNotifiers[0]
 	}
-	// globalBudget 是进程级共享的全局日发送预算，额度来自环境变量 XIANYU_GLOBAL_SEND_DAILY_LIMIT（0=不限）。
-	// store 可用时接入全局桶持久化并恢复今日用量；恢复失败按纯内存预算运行（fail-open）。
+	// globalBudget 是进程级共享的全局日发送预算，额度来自数据库设置 global_send_daily_limit（0=不限），
+	// 数据库未配置时回落到环境变量 XIANYU_GLOBAL_SEND_DAILY_LIMIT；store 可用时接入全局桶持久化并恢复今日用量。
 	var globalBudget *engine.SendBudget
 	if store != nil {
-		globalBudget = engine.NewSendBudgetFromEnv(store.SendCounters, logger)
-		// restoreCtx 是构造期恢复读取的有限收口预算；NewManager 无 owner Context 可继承，
-		// 按架构门禁要求显式限时，防止恢复读取无限等待阻塞管理器构造。
-		restoreCtx, restoreCancel := context.WithTimeout(context.Background(), engine.SendBudgetRestoreTimeout)
-		defer restoreCancel()
-		globalBudget.Restore(restoreCtx)
+		// resolveCtx 是构造期读取全局额度与恢复用量的有限收口预算；NewManager 无 owner Context 可继承，
+		// 按架构门禁要求显式限时，防止数据库读取无限等待阻塞管理器构造。
+		resolveCtx, resolveCancel := context.WithTimeout(context.Background(), engine.SendBudgetRestoreTimeout)
+		defer resolveCancel()
+		// getSetting 是系统设置读取函数；store 未装配设置仓储时退化为仅读环境变量。
+		var getSetting func(context.Context, string) (string, error)
+		if store.Settings != nil {
+			getSetting = store.Settings.Get
+		}
+		// limit 是解析出的全局日发送额度：数据库设置优先、环境变量兜底、缺省不限（0）。
+		limit := engine.ResolveGlobalSendDailyLimit(resolveCtx, getSetting, os.Getenv)
+		globalBudget = engine.NewSendBudget(limit, store.SendCounters, logger)
+		globalBudget.Restore(resolveCtx)
 	}
 	return &Manager{
 		store:          store,

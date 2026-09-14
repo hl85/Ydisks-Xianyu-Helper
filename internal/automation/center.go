@@ -190,7 +190,8 @@ func NewWithDependencies(store *db.Store, senders SenderProvider, logger *slog.L
 		logger: logger.With("subsys", "automation"),
 	}
 	// 业务静默看门狗在构造期装配：活动读取函数未注入时返回 nil，扫描循环跳过检查。
-	center.silence = newSilenceWatchdog(center.dependencies.silenceActivity, center.dependencies.silenceAlerter, center.logger)
+	// 阈值从系统设置读取（数据库优先），未配置回落环境变量，再回落默认 180 分钟。
+	center.silence = newSilenceWatchdog(center.store, center.dependencies.silenceActivity, center.dependencies.silenceAlerter, center.logger)
 	if // recoverer、ok 保存订单详情查询器提供的凭证恢复能力及类型判断结果
 	recoverer, ok := center.dependencies.fetcher.(CredentialRecoverer); ok {
 		center.dependencies.recoverer = recoverer
