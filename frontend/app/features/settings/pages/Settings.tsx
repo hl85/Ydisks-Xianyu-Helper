@@ -137,6 +137,53 @@ const Settings: React.FC = () => {
             </div>
           </section>
 
+          {/* 安全阀门：可在设置页调整的三项安全阀，保存后均需在下次重启时生效（与原有环境变量语义一致）。 */}
+          <section className="space-y-4">
+            <h3 className="text-lg font-extrabold text-gray-800 flex items-center gap-2">
+              <div className="p-1.5 rounded-lg bg-red-500 text-white">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+              安全阀门
+            </h3>
+
+            <div className="ios-card rounded-xl p-6 bg-white space-y-5">
+              {/* AI 回复人工确认：开关，开启后 AI 回复先拦截待人工确认再发送。 */}
+              <label className="flex items-start gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 cursor-pointer">
+                <input type="checkbox" className="mt-1" checked={settings.ai_reply_review_mode || false} onChange={/* 勾选变化更新 AI 回复人工确认开关草稿。 */ event => setSettings({ ...settings, ai_reply_review_mode: event.target.checked })} />
+                <span>
+                  <span className="block text-sm font-bold text-blue-900">AI 回复人工确认模式</span>
+                  <span className="mt-1 block text-xs leading-5 text-blue-800">开启后 AI 生成的回复不会自动发送，需在会话页人工确认后再发出，防止误发。</span>
+                </span>
+              </label>
+
+              {/* 多账号全局日发送额度：数字输入，0 表示不限制。 */}
+              <div className="space-y-3">
+                <label className="block text-sm font-bold text-gray-800">多账号全局日发送额度</label>
+                <input
+                  type="number"
+                  value={settings.global_send_daily_limit ?? 0}
+                  onChange={/* 输入变化更新全局日发送额度草稿，非数字回落不限（0）。 */ (e) => setSettings({ ...settings, global_send_daily_limit: parseInt(e.target.value, 10) || 0 })}
+                  className="w-full ios-input px-4 py-3 rounded-xl"
+                  min="0"
+                />
+                <p className="text-xs text-gray-500">所有账号合计的每日发送条数上限；0 表示不限制。保存后需重启服务生效。</p>
+              </div>
+
+              {/* 业务静默告警阈值：数字输入，0 表示关闭看门狗。 */}
+              <div className="space-y-3">
+                <label className="block text-sm font-bold text-gray-800">业务静默告警阈值（分钟）</label>
+                <input
+                  type="number"
+                  value={settings.silence_alert_minutes ?? 180}
+                  onChange={/* 输入变化更新静默告警阈值草稿，非数字回落默认 180。 */ (e) => setSettings({ ...settings, silence_alert_minutes: parseInt(e.target.value, 10) || 0 })}
+                  className="w-full ios-input px-4 py-3 rounded-xl"
+                  min="0"
+                />
+                <p className="text-xs text-gray-500">业务表持续无事件超过该时长即告警；0 表示关闭看门狗。保存后需重启服务生效，未配置回落 180 分钟。</p>
+              </div>
+            </div>
+          </section>
+
           {/* AI Configuration */}
           <section className="space-y-4">
             <h3 className="text-lg font-extrabold text-gray-800 flex items-center gap-2">

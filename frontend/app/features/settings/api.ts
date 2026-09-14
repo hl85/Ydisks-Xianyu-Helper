@@ -40,6 +40,21 @@ const normalizeSettings = (settings: Record<string, unknown>): SystemSettings =>
     // publicOnly 保存统一出站策略的布尔状态，兼容旧服务端返回的字符串。
     result.outbound_http_public_only = result.outbound_http_public_only === true || result.outbound_http_public_only === 'true';
   }
+  if ('ai_reply_review_mode' in result) {
+    // reviewEnabled 是人工确认开关的布尔状态，匹配引擎接受的真值集合。
+    const raw = result.ai_reply_review_mode;
+    result.ai_reply_review_mode = typeof raw === 'string' && ['1', 'true', 'yes', 'on', 'enabled'].includes(raw.toLowerCase());
+  }
+  if ('global_send_daily_limit' in result) {
+    // limit 是完成数值转换后的全局日发送额度，非有限值回落不限（0）。
+    const limit = Number(result.global_send_daily_limit);
+    result.global_send_daily_limit = Number.isFinite(limit) ? limit : 0;
+  }
+  if ('silence_alert_minutes' in result) {
+    // minutes 是完成数值转换后的静默告警阈值，非有限值回落默认 180。
+    const minutes = Number(result.silence_alert_minutes);
+    result.silence_alert_minutes = Number.isFinite(minutes) ? minutes : 180;
+  }
   return result as SystemSettings;
 };
 
