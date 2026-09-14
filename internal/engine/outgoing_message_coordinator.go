@@ -192,6 +192,12 @@ func (c *outgoingMessageCoordinator) confirmOutgoingEcho(ctx context.Context, wa
 		if c != nil && c.account != nil && c.account.logger != nil {
 			c.account.logger.Warn("自动化出站消息等待闲鱼回显超时", "chat_id", chatID, "wait_timeout_ms", timeout.Milliseconds())
 		}
+		// 超时返回的原因本身就是不确定原因，直接返回它，避免错误文本把同一句话写两遍：
+		// 该文本会原样写入 automation_runs.error_message，并在规则页人工核对面板中展示。
+		if errors.Is(waitErr, errOutgoingEchoUnconfirmed) {
+			return errOutgoingEchoUnconfirmed
+		}
+		// 上下文取消或账号关闭保留原始原因，便于区分「等不到平台回显」与「本地等待被中断」。
 		return fmt.Errorf("%w: %v", errOutgoingEchoUnconfirmed, waitErr)
 	}
 	return nil
