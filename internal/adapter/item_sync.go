@@ -22,6 +22,12 @@ type ItemSyncRepository struct {
 	client func() mtop.Client
 	// logger 记录不含凭证的同步阶段信息。
 	logger *slog.Logger
+	// specProbe 记录「账号 + 商品」最近一次成功向平台确认多规格的时间，用于避免每次同步重复请求详情接口。
+	specProbe map[string]time.Time
+	// specProbeMu 保护 specProbe 的并发读写。
+	specProbeMu sync.Mutex
+	// specProbeTTL 是远端多规格结果的复用时长；到期后重新向平台确认以支持双向变化，为零表示每次都重新探测。
+	specProbeTTL time.Duration
 	// updateRunningCookie 将平台返回的新 Cookie 同步到运行中的账号实例。
 	updateRunningCookie func(context.Context, string, string)
 	// recoverExpiredSession 在平台报告 Session 或 MTOP Token 过期时触发账号恢复。
@@ -36,7 +42,9 @@ func NewItemSyncRepository(store *db.Store, client func() mtop.Client, logger *s
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &ItemSyncRepository{store: store, client: client, logger: logger, updateRunningCookie: updateRunningCookie, recoverExpiredSession: recoverExpiredSession}
+	// repository 保存完成默认值填充后的商品同步适配器。
+	repository := &ItemSyncRepository{store: store, client: client, logger: logger, updateRunningCookie: updateRunningCookie, recoverExpiredSession: recoverExpiredSession, specProbe: make(map[string]time.Time), specProbeTTL: multiSpecProbeTTLDefault}
+	return repository
 }
 
 // OwnsAccount 按非敏感所有者字段判断用户是否拥有账号。
@@ -320,11 +328,16 @@ func (r *ItemSyncRepository) syncItems(ctx context.Context, cookieID string, ite
 // enrichMultiSpec 的详情探测失败不影响商品落库：多规格只是列表的补充事实，
 // 平台风控或单品异常都必须退化为沿用本地或列表已有多规格标记，而不是中断整个同步。
 func (r *ItemSyncRepository) enrichMultiSpec(ctx context.Context, cookies, cookieID string, items []mtop.ItemListItem) itemSyncEnrichOutcome {
-	// outcome 保存本轮探测的次数与首个错误，供调用方记录与账号恢复使用。
-	outcome := itemSyncEnrichOutcome{}
 	// fetcher、ok 保存可选商品详情探测能力及其存在状态。
 	fetcher, ok := r.mtopClient().(mtop.ItemDetailFetcher)
 	if !ok {
+		return itemSyncEnrichOutcome{Reused: len(items)}
+	}
+	// candidates 保存本轮需要向平台确认的商品下标；近期已确认过远端结果的商品不再重复请求详情接口。
+	candidates := r.multiSpecCandidates(cookieID, items)
+	// outcome 保存本轮探测的次数与首个错误，供调用方记录与账号恢复使用。
+	outcome := itemSyncEnrichOutcome{Reused: len(items) - len(candidates)}
+	if len(candidates) == 0 {
 		return outcome
 	}
 	// localMultiSpec 保存本地已持久化的多规格标记，探测失败时避免用未确认的结论覆盖已有事实。
@@ -336,10 +349,12 @@ func (r *ItemSyncRepository) enrichMultiSpec(ctx context.Context, cookies, cooki
 	semaphore := make(chan struct{}, multiSpecProbeConcurrency)
 	// waitGroup 等待所有详情探测 goroutine 结束。
 	var waitGroup sync.WaitGroup
-	// stateMu 保护 outcome 的并发写入。
+	// stateMu 保护 outcome 与 stopping 的并发读写。
 	var stateMu sync.Mutex
+	// stopping 表示已出现平台风控，本轮剩余商品不得继续请求详情接口。
+	stopping := false
 	// index 表示当前需要启动详情探测的商品下标。
-	for index := range items {
+	for _, index := range candidates {
 		waitGroup.Add(1)
 		go func(index int) {
 			defer waitGroup.Done()
@@ -350,6 +365,10 @@ func (r *ItemSyncRepository) enrichMultiSpec(ctx context.Context, cookies, cooki
 			}
 			defer func() { <-semaphore }()
 			stateMu.Lock()
+			if stopping {
+				stateMu.Unlock()
+				return
+			}
 			outcome.Probed++
 			stateMu.Unlock()
 			// isMultiSpec、detectErr 保存当前商品详情探测结果及错误。
@@ -365,10 +384,20 @@ func (r *ItemSyncRepository) enrichMultiSpec(ctx context.Context, cookies, cooki
 				if outcome.FirstErr == nil {
 					outcome.FirstErr = detectErr
 				}
+				// platformRisk 表示本次失败属于必须立刻止损的平台风控而非普通业务错误。
+				platformRisk := mtop.IsRiskVerificationErr(detectErr)
+				if platformRisk {
+					stopping = true
+				}
 				stateMu.Unlock()
+				if platformRisk {
+					// 风控期间继续请求详情只会延长封禁，因此收束本轮剩余探测。
+					cancel()
+				}
 				return
 			}
 			items[index].IsMultiSpec = isMultiSpec
+			r.markMultiSpecProbed(cookieID, items[index].ID)
 		}(index)
 	}
 	waitGroup.Wait()
@@ -391,6 +420,53 @@ func (r *ItemSyncRepository) reportMultiSpecDegraded(ctx context.Context, cookie
 	}
 	logger.Warn("商品多规格探测未全部完成，已沿用本地或列表标记",
 		"account", cookieID, "probed", outcome.Probed, "fallback", outcome.Fallback, "reason", outcome.FirstErr)
+}
+
+// multiSpecCandidates 挑选本轮需要向平台确认多规格的商品下标；近期已确认过的商品直接复用旧结果。
+// 商品详情接口短时高频调用会触发平台风控，因此这里同时受单轮上限约束，剩余商品留给后续同步逐步确认。
+func (r *ItemSyncRepository) multiSpecCandidates(cookieID string, items []mtop.ItemListItem) []int {
+	// candidates 保存本轮待探测的商品下标，容量足够容纳全部商品以避免扩容。
+	candidates := make([]int, 0, len(items))
+	// now 保存本次筛选的统一基准时间，避免每个商品重复读取时钟。
+	now := time.Now()
+	// index 表示当前待判断是否复用旧结果的商品下标。
+	for index := range items {
+		if r.multiSpecFresh(cookieID, items[index].ID, now) {
+			continue
+		}
+		candidates = append(candidates, index)
+		if len(candidates) >= multiSpecProbeMaxPerRound {
+			break
+		}
+	}
+	return candidates
+}
+
+// multiSpecFresh 判断商品的多规格远端结果是否仍处于可复用有效期内。
+func (r *ItemSyncRepository) multiSpecFresh(cookieID, itemID string, now time.Time) bool {
+	if r.specProbeTTL <= 0 {
+		return false
+	}
+	r.specProbeMu.Lock()
+	// probedAt、ok 保存该商品上次成功确认的时间及其是否存在记录。
+	probedAt, ok := r.specProbe[multiSpecProbeKey(cookieID, itemID)]
+	r.specProbeMu.Unlock()
+	return ok && now.Sub(probedAt) < r.specProbeTTL
+}
+
+// markMultiSpecProbed 记录商品刚刚成功确认过远端多规格事实，使其在复用期内不再重复请求详情接口。
+func (r *ItemSyncRepository) markMultiSpecProbed(cookieID, itemID string) {
+	if r.specProbe == nil {
+		return
+	}
+	r.specProbeMu.Lock()
+	r.specProbe[multiSpecProbeKey(cookieID, itemID)] = time.Now()
+	r.specProbeMu.Unlock()
+}
+
+// multiSpecProbeKey 生成「账号 + 商品」的多规格复用键，避免不同账号的同名商品互相串用结果。
+func multiSpecProbeKey(cookieID, itemID string) string {
+	return cookieID + "\x00" + itemID
 }
 
 // localMultiSpecSnapshot 读取账号下已持久化的商品多规格标记，作为详情探测失败时的兜底事实。
@@ -418,8 +494,14 @@ func (r *ItemSyncRepository) localMultiSpecSnapshot(ctx context.Context, cookieI
 	return snapshot
 }
 
-// multiSpecProbeConcurrency 是同时进行商品详情探测的最大数量，超出后排队等待。
-const multiSpecProbeConcurrency = 4
+// multiSpecProbeConcurrency 是同时进行商品详情探测的最大数量；该接口短时高频调用会触发平台风控，必须保持极低并发。
+const multiSpecProbeConcurrency = 2
+
+// multiSpecProbeTTLDefault 是远端多规格结果的默认复用时长，到期后重新向平台确认，兼顾降频与双向变化。
+const multiSpecProbeTTLDefault = 6 * time.Hour
+
+// multiSpecProbeMaxPerRound 是单次同步最多发起的商品详情探测数量，超出部分留给后续同步逐步确认。
+const multiSpecProbeMaxPerRound = 20
 
 // itemSyncEnrichOutcome 描述一轮多规格探测的结果；详情探测只补充列表事实，
 // 失败必须退化为沿用已有标记，因此它携带统计与首个错误，但不再作为同步失败原因。
@@ -428,6 +510,8 @@ type itemSyncEnrichOutcome struct {
 	FirstErr error
 	// Probed 保存本轮真正向平台发起的详情探测次数，用于观察接口调用量。
 	Probed int
+	// Reused 保存因近期已向平台确认过而跳过探测的商品数量。
+	Reused int
 	// Fallback 保存因探测失败而改用本地已有多规格标记的商品数量。
 	Fallback int
 }

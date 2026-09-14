@@ -54,6 +54,8 @@ func TestItemSyncRepositoryEnrichMultiSpecBoundsConcurrency(t *testing.T) {
 	}}
 	// repository 是使用测试数据库和平台替身的商品同步适配器。
 	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, nil)
+	// 关闭多规格复用，保证本用例继续覆盖每次同步全量重探的并发路径。
+	repository.specProbeTTL = 0
 	// items 保存等待探测的商品列表。
 	items := make([]mtop.ItemListItem, 8)
 	// index 表示当前商品在测试列表中的下标。
@@ -65,8 +67,8 @@ func TestItemSyncRepositoryEnrichMultiSpecBoundsConcurrency(t *testing.T) {
 	if outcome.FirstErr != nil {
 		t.Fatalf("首次多规格探测失败：%v", outcome.FirstErr)
 	}
-	if maxActive > 4 {
-		t.Fatalf("探测并发=%d，超过上限 4", maxActive)
+	if maxActive > multiSpecProbeConcurrency {
+		t.Fatalf("探测并发=%d，超过上限 %d", maxActive, multiSpecProbeConcurrency)
 	}
 	// index、item 分别表示商品下标和探测结果。
 	for index, item := range items {
@@ -74,7 +76,7 @@ func TestItemSyncRepositoryEnrichMultiSpecBoundsConcurrency(t *testing.T) {
 			t.Fatalf("商品 %d 未标记为多规格", index)
 		}
 	}
-	// secondItems 保存第二次调用使用的商品列表，验证同步不会复用上一次多规格结果。
+	// secondItems 保存第二次调用使用的商品列表；本用例关闭复用，因此第二次仍应重新探测。
 	secondItems := make([]mtop.ItemListItem, len(items))
 	// index 表示第二次探测商品的下标。
 	for index := range secondItems {
@@ -100,8 +102,9 @@ func TestItemSyncRepositoryEnrichMultiSpecFollowsRemoteBothDirections(t *testing
 	client := &itemSyncDetailClient{detect: func(_ context.Context, _ string, _ string) (bool, error) {
 		return remoteValue, nil
 	}}
-	// repository 是使用详情探测替身的商品同步适配器。
+	// repository 是使用详情探测替身的商品同步适配器；本用例关闭复用以覆盖双向变化。
 	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, nil)
+	repository.specProbeTTL = 0
 	// items 保存第一次同步前仍带有旧多规格标记的商品。
 	items := []mtop.ItemListItem{{ID: "changing-item", IsMultiSpec: true}}
 	remoteValue = false
@@ -157,5 +160,98 @@ func TestItemSyncRepositoryEnrichMultiSpecFailureKeepsLocalValue(t *testing.T) {
 	}
 	if probeCalls != 1 {
 		t.Fatalf("单品失败仍发起了 %d 次探测，期望=1", probeCalls)
+	}
+}
+
+// TestItemSyncRepositoryEnrichMultiSpecReusesRecentProbe 验证复用期内的重复同步不再请求商品详情接口。
+func TestItemSyncRepositoryEnrichMultiSpecReusesRecentProbe(t *testing.T) {
+	// store、cleanup 保存本次验证使用的隔离数据库与清理责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// probeCalls 保存平台详情调用次数，用于验证降频是否真的生效。
+	probeCalls := 0
+	// client 是恒定返回多规格的平台替身。
+	client := &itemSyncDetailClient{detect: func(_ context.Context, _ string, _ string) (bool, error) {
+		probeCalls++
+		return true, nil
+	}}
+	// repository 是使用详情探测替身的商品同步适配器，保持默认复用窗口。
+	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, nil)
+	// items 保存被重复同步的同一种商品列表。
+	items := []mtop.ItemListItem{{ID: "reuse-item"}}
+	// first 保存首次同步的探测统计，首次必须真正向平台确认。
+	first := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", items)
+	if first.Probed != 1 || first.Reused != 0 {
+		t.Fatalf("首次同步应请求详情 first=%+v", first)
+	}
+	// second 保存复用期内的第二次同步统计，此时不应再占用平台额度。
+	second := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", items)
+	if second.Probed != 0 || second.Reused != 1 {
+		t.Fatalf("复用期内不应重复请求详情 second=%+v", second)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("平台详情调用次数=%d，期望=1", probeCalls)
+	}
+}
+
+// TestItemSyncRepositoryEnrichMultiSpecReprobesAfterTTL 验证复用窗口结束后会重新确认远端事实，保留双向变化能力。
+func TestItemSyncRepositoryEnrichMultiSpecReprobesAfterTTL(t *testing.T) {
+	// store、cleanup 保存本次验证使用的隔离数据库与清理责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// probeCalls 保存平台详情调用次数，用于验证过期后确实重新探测。
+	probeCalls := 0
+	// client 是恒定返回多规格的平台替身。
+	client := &itemSyncDetailClient{detect: func(_ context.Context, _ string, _ string) (bool, error) {
+		probeCalls++
+		return true, nil
+	}}
+	// repository 使用已过期的复用窗口，模拟距离上次确认很久之后的同步。
+	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, nil)
+	repository.specProbeTTL = -time.Second
+	// items 保存被重复同步的同一种商品列表。
+	items := []mtop.ItemListItem{{ID: "expired-item"}}
+	// index 表示重复同步的轮次，连续两次都应重新向平台确认。
+	for round := 0; round < 2; round++ {
+		// roundOutcome 保存本轮同步的探测统计。
+		roundOutcome := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", items)
+		if roundOutcome.Probed != 1 {
+			t.Fatalf("第 %d 轮应重新请求详情 outcome=%+v", round+1, roundOutcome)
+		}
+	}
+	if probeCalls != 2 {
+		t.Fatalf("平台详情调用次数=%d，期望=2", probeCalls)
+	}
+}
+
+// TestItemSyncRepositoryEnrichMultiSpecStopsOnRiskVerification 验证平台风控出现后本轮剩余商品不再继续请求详情。
+func TestItemSyncRepositoryEnrichMultiSpecStopsOnRiskVerification(t *testing.T) {
+	// store、cleanup 保存本次验证使用的隔离数据库与清理责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// riskErr 模拟平台安全验证拒绝，文案取自真实响应。
+	riskErr := errors.New("商品详情接口触发闲鱼安全验证；平台原因：FAIL_SYS_USER_VALIDATE；RGV587_ERROR::SM")
+	// probeCalls 保存平台详情调用次数，用于验证风控后是否立即止损。
+	probeCalls := 0
+	// client 是恒定返回风控错误的平台替身。
+	client := &itemSyncDetailClient{detect: func(_ context.Context, _ string, _ string) (bool, error) {
+		probeCalls++
+		return false, riskErr
+	}}
+	// repository 是使用详情探测替身的商品同步适配器。
+	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, nil)
+	// items 保存远超并发上限的商品列表，未止损时会持续消耗平台额度。
+	items := make([]mtop.ItemListItem, 12)
+	// index 表示当前待填充商品的下标。
+	for index := range items {
+		items[index].ID = fmt.Sprintf("risk-item-%d", index)
+	}
+	// outcome 保存本轮风控场景的探测统计。
+	outcome := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", items)
+	if outcome.FirstErr == nil {
+		t.Fatal("风控场景未记录首个错误")
+	}
+	if probeCalls > multiSpecProbeConcurrency {
+		t.Fatalf("风控后仍在继续请求详情，调用次数=%d，应不超过并发上限 %d", probeCalls, multiSpecProbeConcurrency)
 	}
 }
