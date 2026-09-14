@@ -241,3 +241,46 @@ func TestSilenceThresholdFromEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveSilenceThreshold 验证读取优先级：设置命中 > 设置为空回落 env > 都为空回落默认 > 非法值回落默认。
+func TestResolveSilenceThreshold(t *testing.T) {
+	// defaultMinutes 是期望的默认阈值。
+	defaultMinutes := defaultSilenceAlertMinutes * time.Minute
+	// cases 覆盖四种优先级分支，确保数据库配置真正压过环境变量。
+	cases := []struct {
+		// name 是当前用例名称。
+		name string
+		// setting 是数据库系统设置值；ok 为 false 时模拟未配置或读取失败。
+		setting string
+		// ok 表示是否预置数据库设置值。
+		ok bool
+		// env 是环境变量 XIANYU_SILENCE_ALERT_MINUTES 的值；空串表示未设置。
+		env string
+		// want 是期望解析出的阈值。
+		want time.Duration
+	}{
+		{name: "设置命中优先于环境变量", setting: "90", ok: true, env: "999", want: 90 * time.Minute},
+		{name: "设置为空回落到环境变量", setting: "", ok: true, env: "60", want: 60 * time.Minute},
+		{name: "设置与环境变量都为空回落默认", setting: "", ok: true, env: "", want: defaultMinutes},
+		{name: "设置非法值回落到环境变量", setting: "bad", ok: true, env: "45", want: 45 * time.Minute},
+		{name: "设置负值回落到环境变量", setting: "-9", ok: true, env: "45", want: 45 * time.Minute},
+		{name: "数据库读取失败回落到环境变量", setting: "90", ok: false, env: "30", want: 30 * time.Minute},
+	}
+	for // tc 表示当前遍历过程中的用例
+	_, tc := range cases {
+		// getSetting 是注入的假设置读取函数；ok 为 false 时返回错误模拟读取失败。
+		var getSetting func(context.Context, string) (string, error)
+		if tc.ok {
+			getSetting = func(_ context.Context, _ string) (string, error) { return tc.setting, nil }
+		} else {
+			getSetting = func(_ context.Context, _ string) (string, error) { return "", errors.New("db unavailable") }
+		}
+		// getenv 是注入的假环境变量读取函数。
+		getenv := func(string) string { return tc.env }
+		// got 保存实际解析阈值。
+		got := resolveSilenceThreshold(context.Background(), getSetting, getenv)
+		if got != tc.want {
+			t.Fatalf("%s: threshold = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

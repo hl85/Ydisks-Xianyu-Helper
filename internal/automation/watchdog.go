@@ -9,11 +9,21 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"xianyu-go/internal/db"
 )
 
 // silenceAlertEnv 控制业务静默看门狗的告警阈值（分钟）：默认 180，0 表示整体关闭。
 // 阈值用环境变量而非系统设置，是为了在上游接口长时间无事件时与其它止血开关保持同一运维方式。
 const silenceAlertEnv = "XIANYU_SILENCE_ALERT_MINUTES"
+
+// silenceAlertSetting 是数据库系统设置中保存业务静默告警阈值的键；
+// 未配置时回落到环境变量 XIANYU_SILENCE_ALERT_MINUTES，再回落到默认 180 分钟。
+const silenceAlertSetting = "silence_alert_minutes"
+
+// silenceWatchdogResolveTimeout 是构造期从 DB 读取静默阈值的有限收口预算；
+// 按架构门禁要求显式限时，防止系统设置读取无限等待阻塞自动化中心构造。
+const silenceWatchdogResolveTimeout = 5 * time.Second
 
 // defaultSilenceAlertMinutes 是未配置环境变量时的默认静默告警阈值（分钟），
 // 覆盖闲鱼卖家夜间无买家的真实闲时，避免正常低谷误报。
@@ -63,21 +73,50 @@ type silenceWatchdog struct {
 }
 
 // newSilenceWatchdog 根据装配依赖构造看门狗；readActivity 为 nil 表示未装配，返回 nil 且扫描循环跳过。
-// threshold 从环境变量读取，构造期固化，运行期不再读取环境变量。
-func newSilenceWatchdog(readActivity BusinessSilenceActivityReader, alerter BusinessSilenceAlerter, logger *slog.Logger) *silenceWatchdog {
+// threshold 在构造期从系统设置读取（数据库设置优先），未配置时回落环境变量，再回落默认值；构造期固化，运行期不再读取。
+// store 用于读取系统设置；为 nil 时退化为仅读环境变量。
+func newSilenceWatchdog(store *db.Store, readActivity BusinessSilenceActivityReader, alerter BusinessSilenceAlerter, logger *slog.Logger) *silenceWatchdog {
 	if readActivity == nil {
 		return nil
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// getSetting 是系统设置读取函数；store 未装配设置仓储时退化为仅读环境变量。
+	var getSetting func(context.Context, string) (string, error)
+	if store != nil && store.Settings != nil {
+		getSetting = store.Settings.Get
+	}
+	// resolveCtx、resolveCancel 是构造期读取静默阈值的有限收口预算；Center 无 owner Context 可继承，
+	// 按架构门禁要求显式限时，防止系统设置读取无限等待阻塞自动化中心构造。
+	resolveCtx, resolveCancel := context.WithTimeout(context.Background(), silenceWatchdogResolveTimeout)
+	defer resolveCancel()
+	// threshold 是解析出的静默告警阈值：系统设置优先、环境变量兜底、缺省 180 分钟。
+	threshold := resolveSilenceThreshold(resolveCtx, getSetting, os.Getenv)
 	return &silenceWatchdog{
-		threshold:    silenceThresholdFromEnv(os.Getenv),
+		threshold:    threshold,
 		readActivity: readActivity,
 		alerter:      alerter,
 		now:          time.Now,
 		logger:       logger,
 	}
+}
+
+// resolveSilenceThreshold 解析业务静默看门狗阈值，优先级：系统设置 > 环境变量 > 默认值。
+// getSetting 从系统设置读取；为 nil 时跳过设置层直接读环境变量。getenv 读取环境变量。
+// 设置或环境变量非法（非非负整数）时回落默认值 180 分钟，避免手滑配置悄悄关掉告警。
+func resolveSilenceThreshold(ctx context.Context, getSetting func(context.Context, string) (string, error), getenv func(string) string) time.Duration {
+	if getSetting != nil {
+		// dbValue、dbErr 是系统设置读取结果；读取成功且为合法非负整数时优先采用。
+		if dbValue, dbErr := getSetting(ctx, silenceAlertSetting); dbErr == nil {
+			// minutes 是设置解析出的分钟数；合法即采用，保证界面配置优先于环境变量。
+			if minutes, parseErr := strconv.Atoi(strings.TrimSpace(dbValue)); parseErr == nil && minutes >= 0 {
+				return time.Duration(minutes) * time.Minute
+			}
+		}
+	}
+	// 设置缺失或非法时回落到环境变量解析（env 为空或非法则回落默认）。
+	return silenceThresholdFromEnv(getenv)
 }
 
 // silenceThresholdFromEnv 从环境变量解析静默告警阈值。

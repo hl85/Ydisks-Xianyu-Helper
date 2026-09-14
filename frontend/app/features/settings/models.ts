@@ -35,6 +35,12 @@ export interface SystemSettings {
   'captcha.remote_secret_key_configured'?: boolean;
   /** 远程验证码服务 Cookie 配置。 */
   'captcha.remote_pass_cookies'?: boolean | string;
+  /** 是否启用 AI 回复人工确认模式，开启后 AI 回复需人工确认后再发送。 */
+  ai_reply_review_mode?: boolean;
+  /** 多账号合计的每日发送条数上限，0 表示不限制。 */
+  global_send_daily_limit?: number;
+  /** 业务静默告警阈值（分钟），0 表示关闭看门狗，未配置回落默认 180。 */
+  silence_alert_minutes?: number;
   /** 兼容未来配置键的扩展字段。 */
   /** 未知设置键只能承载服务端声明的标量值，敏感值不进入该 UI 模型。 */
   [key: string]: string | number | boolean | undefined;
