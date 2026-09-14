@@ -17,3 +17,6 @@ cover.out
 !/.docker/
 !/.docker/playwright-runtime/
 !/.docker/playwright-runtime/**
+
+# 本地任务工作区：内含其它分支的源码快照，不得进入镜像构建上下文。
+.worktree
