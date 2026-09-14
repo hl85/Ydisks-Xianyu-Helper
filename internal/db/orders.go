@@ -266,12 +266,14 @@ func upsertOrder(ctx context.Context, execer sqlQueryExecer, dialect Dialect, or
 	attempt := 0; attempt < maxOrderUpsertRetries; attempt++ {
 		// existingCookie、existingStatus、deletedAt 保存当前归属、阶段和软删除标记，分别约束写入身份、状态推进和恢复。
 		var existingCookie, existingStatus, deletedAt sql.NullString
+		// existingShippedAt 是本地已有的发货时间；非空时禁止被后续状态推进覆盖，保证首次发货时间稳定。
+		var existingShippedAt string
 		// version 是读取快照的版本，必须与实际 UPDATE 时的版本匹配。
 		var version int
 		if // err 保存占位插入后的快照读取失败，失败时不执行猜测性更新。
 		err := execer.QueryRowContext(ctx,
-			`SELECT cookie_id,order_status,version,deleted_at FROM orders WHERE order_id=?`, orderID).
-			Scan(&existingCookie, &existingStatus, &version, &deletedAt); err != nil {
+			`SELECT cookie_id,order_status,version,deleted_at,COALESCE(shipped_at,'') FROM orders WHERE order_id=?`, orderID).
+			Scan(&existingCookie, &existingStatus, &version, &deletedAt, &existingShippedAt); err != nil {
 			return err
 		}
 		if opts.CookieID != "" && existingCookie.Valid && existingCookie.String != "" && existingCookie.String != opts.CookieID {
@@ -282,6 +284,14 @@ func upsertOrder(ctx context.Context, execer sqlQueryExecer, dialect Dialect, or
 		current := opts
 		if current.OrderStatus != "" && !shouldUpdateOrderStatus(existingStatus.String, current.OrderStatus) {
 			current.OrderStatus = ""
+		}
+		// 状态首次推进到已发货/已完成时补记发货时间：求评价等计划任务以 shipped_at 为基准，
+		// 该字段为空时只能回退到随时被刷新的 updated_at，等待窗口会不断后移而永不触发。
+		// 只在旧状态与新状态不同、且本地尚无发货时间时补记，因此早已处于该状态的历史订单不会被回溯。
+		if current.OrderStatus != "" && current.OrderStatus != existingStatus.String && existingShippedAt == "" {
+			if current.OrderStatus == "shipped" || current.OrderStatus == "completed" {
+				current.ShippedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			}
 		}
 		// set、args 保存本次合并字段和参数，最终追加旧版本及旧账号作原子写入条件。
 		set, args := orderUpsertAssignments(current)
@@ -381,6 +391,8 @@ func orderUpsertAssignments(opts OrderUpsertOpts) ([]string, []any) {
 	add("receiver_phone", opts.ReceiverPhone, opts.ReceiverPhone != "")
 	add("receiver_address", opts.ReceiverAddr, opts.ReceiverAddr != "")
 	add("receiver_city", opts.ReceiverCity, opts.ReceiverCity != "")
+	// shipped_at 由仓储在状态首次推进到已发货/已完成时填充；调用方留空时保持数据库原值。
+	add("shipped_at", opts.ShippedAt, opts.ShippedAt != "")
 	return set, args
 }
 
@@ -452,6 +464,8 @@ type OrderUpsertOpts struct {
 	ChatID        string
 	IsBargain     *bool
 	SystemShipped *bool
+	// ShippedAt 是发货时间文本；由仓储在订单状态首次推进到已发货/已完成时自动填充，调用方通常留空。
+	ShippedAt string
 }
 
 // maxOrderBatchLookupSize 限制批量订单查询的 IN 参数数量，兼容 SQLite 参数上限。
