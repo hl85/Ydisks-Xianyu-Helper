@@ -237,3 +237,28 @@ type fakeClock struct {
 func (c *fakeClock) nowFunc() time.Time {
 	return c.now
 }
+
+// TestNewWriter_EnabledAndDisabled 用真实构造入口覆盖 NewWriter 的启用、显式关闭与未装配三条分支。
+func TestNewWriter_EnabledAndDisabled(t *testing.T) {
+	// store 是假存储，供构造期注入。
+	store := &fakeBeatStore{}
+	t.Setenv(heartbeatIntervalEnv, "45")
+	// enabled 是有效配置下的写者，周期应为配置值。
+	enabled := NewWriter(store, slog.Default())
+	if enabled == nil {
+		t.Fatal("有效配置应构造出写者")
+	}
+	if enabled.interval != 45*time.Second {
+		t.Fatalf("周期应为 45s, got %v", enabled.interval)
+	}
+	// 显式关闭：环境变量为 0 时不应构造写者，调用方据此跳过启动。
+	t.Setenv(heartbeatIntervalEnv, "0")
+	if closed := NewWriter(store, slog.Default()); closed != nil {
+		t.Fatalf("显式关闭应返回 nil, got %+v", closed)
+	}
+	// 未装配存储：即便配置有效也不应构造空转写者。
+	t.Setenv(heartbeatIntervalEnv, "30")
+	if nilStore := NewWriter(nil, slog.Default()); nilStore != nil {
+		t.Fatalf("未装配存储应返回 nil, got %+v", nilStore)
+	}
+}

@@ -23,6 +23,13 @@ REPO=/Users/wanghui/Code/oss-research/Ydisks-Xianyu-Helper
 「自动化发货 / 回复主链路」= 平台事件或调度扫描 → 运行创建 → 动作执行 → 消息发送 →
 自身回显/受理凭证确认 → 订单状态与运行状态落库，以及这条链上的持久化与协议层。
 
+> ⚠️ 2026-09-14 复核：下表 2026-09-13 的数值已因 09-14 两次上游合并而失效——上游新增代码未配套测试，
+> 且移除了 SendReceipt 相关用例。实测（2026-09-14，commit 74dd650，本轮批次全部合入后，口径同上）：
+> ws/sync.go 86.3%、outgoing_message_coordinator.go 73.0%、outgoing_echo_confirmation.go 67.1%、
+> run_coordinator.go 86.4%、scheduler.go 85.4%、center.go 88.4%、action_executor.go 91.1%。
+> 与基线 a2ae5ea（本轮批次之前）逐项持平，说明**本轮本地改动未拉低核心链路覆盖率**，
+> 与下表 09-13 数值的差额来自上游合并。表格待下次整体统计时刷新。
+
 最近一次统计（2026-09-13，`go1.26.8` 容器，未启用 `RUN_BROWSER_INTEGRATION`）：
 
 | 文件 | 链路职责 | 未覆盖/总语句 | 覆盖率 | 门槛 |
