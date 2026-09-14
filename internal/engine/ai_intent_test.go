@@ -107,3 +107,74 @@ func TestClassifyIntentMatchesLegacyBargainGate(t *testing.T) {
 		}
 	}
 }
+
+// TestParseComplaintKeywords 验证扩展词表解析：空集回落、非法正则忽略、正常正则编译、分隔符兼容。
+func TestParseComplaintKeywords(t *testing.T) {
+	// 空值回落 nil。
+	if got := ParseComplaintKeywords("", nil); got != nil {
+		t.Fatalf("空词表应返回 nil，实际 %v", got)
+	}
+	// 仅空白同样回落 nil。
+	if got := ParseComplaintKeywords("   ；  ", nil); got != nil {
+		t.Fatalf("纯空白词表应返回 nil，实际 %v", got)
+	}
+	// 非法正则被忽略，合法项保留；同时验证半角与全角分隔符、首尾空白。
+	got := ParseComplaintKeywords(" 货不对板 ; [非法( ; 维权补 , 包退 ", nil)
+	// want 是期望保留的合法正则数量（货不对板、维权补、包退 三项，[非法( 被忽略）。
+	want := 3
+	if len(got) != want {
+		t.Fatalf("非法正则应被忽略，保留 %d 项，实际 %d 项: %v", want, len(got), got)
+	}
+	// re 表示当前遍历到的已编译正则，必须非 nil 且能匹配原关键词。
+	for _, re := range got {
+		if re == nil {
+			t.Fatal("不应出现 nil 正则")
+		}
+	}
+	// 两个分隔符之间夹纯空白段（空格非分隔符）会得到空项，应被跳过不计入结果。
+	if empty := ParseComplaintKeywords("a; ;b", nil); len(empty) != 2 {
+		t.Fatalf("分隔符间纯空白段应跳过，期望 2 项，实际 %d 项: %v", len(empty), empty)
+	}
+}
+
+// TestClassifyIntentWithKeywordsUnion 验证扩展词表与内置取并集而非替换：内置仍生效、扩展新增也生效。
+func TestClassifyIntentWithKeywordsUnion(t *testing.T) {
+	// extra 是运维新增的投诉说法（货不对板）。
+	extra := ParseComplaintKeywords("货不对板", nil)
+	// 内置说法仍应命中负向意图（证明内置未被清空）。
+	if got := classifyIntentWithKeywords("我要退款", extra); len(got) == 0 || got[0] != IntentComplaint {
+		t.Fatalf("内置词表应仍生效，实际 %v", got)
+	}
+	// 扩展说法也应命中负向意图。
+	if got := classifyIntentWithKeywords("这东西货不对板", extra); len(got) == 0 || got[0] != IntentComplaint {
+		t.Fatalf("扩展词表应生效，实际 %v", got)
+	}
+	// 扩展词表不得误伤正常砍价：含砍价表达且命中扩展投诉时应被负向短路，而非当作砍价放行。
+	if got := classifyIntentWithKeywords("货不对板，再便宜点", extra); len(got) != 1 || got[0] != IntentComplaint {
+		t.Fatalf("投诉+砍价应被负向短路为 complaint，实际 %v", got)
+	}
+}
+
+// TestClassifyIntentWithKeywordsEmptyFallsBack 验证空扩展词表等价于内置分类，行为不回退。
+func TestClassifyIntentWithKeywordsEmptyFallsBack(t *testing.T) {
+	// 空扩展应与原 classifyIntent 行为完全一致。
+	if got := classifyIntentWithKeywords("便宜点", nil); !reflect.DeepEqual(got, classifyIntent("便宜点")) {
+		t.Fatalf("空扩展词表应等价内置，实际 %v", got)
+	}
+}
+
+// TestPrimaryIntentLabel 验证命中集合到历史标签的收敛语义：零命中/单命中/多命中的取值。
+func TestPrimaryIntentLabel(t *testing.T) {
+	// 零命中归并到 chitchat（旧值 "chat" 的更名）。
+	if got := primaryIntentLabel(nil); got != IntentChitchat {
+		t.Fatalf("零命中应为 chitchat，实际 %q", got)
+	}
+	// 单一命中直接写该意图。
+	if got := primaryIntentLabel([]string{IntentBargain}); got != IntentBargain {
+		t.Fatalf("单一命中应写该意图，实际 %q", got)
+	}
+	// 多命中归并到 ambiguous。
+	if got := primaryIntentLabel([]string{IntentBargain, IntentOrder}); got != IntentAmbiguous {
+		t.Fatalf("多命中应为 ambiguous，实际 %q", got)
+	}
+}

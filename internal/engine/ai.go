@@ -57,12 +57,22 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 	if err != nil || cfg == nil || !cfg.AIEnabled {
 		return nil, nil // 未启用 AI
 	}
+	// extraKeywords 是运维可扩展的投诉负向词表（来自设置 ai_complaint_keywords），与内置取并集；
+	// 读取失败或非法项已安全回落，不会导致漏拦。
+	extraKeywords, kwErr := a.loadComplaintKeywords(ctx)
+	if kwErr != nil {
+		a.logger.Warn("读取投诉扩展词表失败，回落内置词表", "err", kwErr)
+	}
+	// hits 是当前消息的意图命中集合（已含扩展投诉词表）。
+	hits := classifyIntentWithKeywords(m.Text, extraKeywords)
 	// 意图注册表做规则前置：AI 只接管明确的砍价意图；投诉/售后类消息即使夹带砍价
 	// 表达也交给默认回复与人工处理，避免 AI 在纠纷场景即兴承诺或降价。
 	// 其余意图（order/inquiry/consult）保持既有路由不变，仍走默认回复。
-	if !aiShouldHandleIntent(classifyIntent(m.Text)) {
+	if !aiShouldHandleIntent(hits) {
 		return nil, nil
 	}
+	// userIntent 是写入对话历史的真实意图标签（多命中/零命中分别归并到 ambiguous/chitchat）。
+	userIntent := primaryIntentLabel(hits)
 	// aiCfg、err 用于本次流程后续判断的人工智能Cfg、err
 	aiCfg, err := a.globalAIConfig(ctx)
 	if err != nil {
@@ -163,14 +173,9 @@ func (a *AIReplierImpl) Reply(ctx context.Context, m ChatMessage) (*ReplyResult,
 		quote = &AIPriceQuoteProposal{PriceCents: priceToCents(markerPrice)}
 	}
 	if m.ChatID != "" && m.ItemID != "" {
-		// intent 用于本次流程后续判断的intent
-		intent := "chat"
-		if isBargain {
-			intent = "bargain"
-		}
 		if // err 用于本次流程后续判断的err
 		err := a.store.AIReply.AddConversationExchange(ctx, a.cookieID, m.ChatID, m.SenderUserID, m.ItemID,
-			db.AIConversationMessage{Role: "user", Content: m.Text, Intent: intent, BargainCount: bargainCount},
+			db.AIConversationMessage{Role: "user", Content: m.Text, Intent: userIntent, BargainCount: bargainCount},
 			db.AIConversationMessage{Role: "assistant", Content: reply, Intent: "reply", BargainCount: bargainCount},
 		); err != nil {
 			return nil, fmt.Errorf("保存 AI 对话失败: %w", err)
@@ -201,6 +206,17 @@ type globalAIConfig struct {
 	APIKey  string
 	BaseURL string
 	Model   string
+}
+
+// loadComplaintKeywords 从设置读取可扩展的投诉负向词表并解析为已校验正则。
+// 读取失败返回错误（调用方记告警并回落内置词表）；空值解析为 nil（同样回落内置，宁可多拦不可少拦）。
+func (a *AIReplierImpl) loadComplaintKeywords(ctx context.Context) ([]*regexp.Regexp, error) {
+	// raw 是设置 ai_complaint_keywords 的原始字符串值。
+	raw, err := a.store.Settings.Get(ctx, "ai_complaint_keywords")
+	if err != nil {
+		return nil, err
+	}
+	return ParseComplaintKeywords(raw, a.logger), nil
 }
 
 // globalAIConfig 封装globalAI配置业务协调。
