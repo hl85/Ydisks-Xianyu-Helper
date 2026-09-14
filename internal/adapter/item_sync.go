@@ -86,14 +86,9 @@ func (r *ItemSyncRepository) SyncAll(ctx context.Context, query itemapp.SyncQuer
 	if result.UpdatedCookies != "" {
 		detailCookies = result.UpdatedCookies
 	}
-	// detailErr 保存远端多规格探测错误。
-	detailErr := r.enrichMultiSpec(requestContext, detailCookies, query.CookieID, result.Items)
-	if detailErr != nil {
-		if mtop.IsCredentialRefreshableErr(detailErr) {
-			r.recoverExpired(requestCtx, query.CookieID, detailErr)
-		}
-		return itemapp.SyncAllResult{}, syncStageError(itemapp.SyncErrorPlatform, detailErr)
-	}
+	// enrichOutcome 保存本轮多规格探测的次数与首个错误；探测失败只降级，不再中断同步。
+	enrichOutcome := r.enrichMultiSpec(requestContext, detailCookies, query.CookieID, result.Items)
+	r.reportMultiSpecDegraded(requestContext, query.CookieID, enrichOutcome)
 	// persistErr 保存探测后 Cookie 会话提交错误。
 	persistErr := r.persistAfterEnrich(requestCtx, query, latest, session, cookieValue, result.UpdatedCookies)
 	if persistErr != nil {
@@ -137,14 +132,9 @@ func (r *ItemSyncRepository) SyncPage(ctx context.Context, query itemapp.SyncQue
 	if result.UpdatedCookies != "" {
 		detailCookies = result.UpdatedCookies
 	}
-	// detailErr 保存远端多规格探测错误。
-	detailErr := r.enrichMultiSpec(requestContext, detailCookies, query.CookieID, result.Items)
-	if detailErr != nil {
-		if mtop.IsCredentialRefreshableErr(detailErr) {
-			r.recoverExpired(requestCtx, query.CookieID, detailErr)
-		}
-		return itemapp.SyncPageResult{}, syncStageError(itemapp.SyncErrorPlatform, detailErr)
-	}
+	// enrichOutcome 保存本页多规格探测的次数与首个错误；探测失败只降级，不再中断同步。
+	enrichOutcome := r.enrichMultiSpec(requestContext, detailCookies, query.CookieID, result.Items)
+	r.reportMultiSpecDegraded(requestContext, query.CookieID, enrichOutcome)
 	// persistErr 保存探测后 Cookie 会话提交错误。
 	persistErr := r.persistAfterEnrich(requestCtx, query, latest, session, cookieValue, result.UpdatedCookies)
 	if persistErr != nil {
@@ -327,32 +317,29 @@ func (r *ItemSyncRepository) syncItems(ctx context.Context, cookieID string, ite
 	return r.store.Items.SyncFromRemote(ctx, cookieID, rows)
 }
 
-// enrichMultiSpec 每次同步都以远端商品详情重新确定多规格字段，支持多规格与单规格双向变化。
-func (r *ItemSyncRepository) enrichMultiSpec(ctx context.Context, cookies, cookieID string, items []mtop.ItemListItem) error {
+// enrichMultiSpec 的详情探测失败不影响商品落库：多规格只是列表的补充事实，
+// 平台风控或单品异常都必须退化为沿用本地或列表已有多规格标记，而不是中断整个同步。
+func (r *ItemSyncRepository) enrichMultiSpec(ctx context.Context, cookies, cookieID string, items []mtop.ItemListItem) itemSyncEnrichOutcome {
+	// outcome 保存本轮探测的次数与首个错误，供调用方记录与账号恢复使用。
+	outcome := itemSyncEnrichOutcome{}
 	// fetcher、ok 保存可选商品详情探测能力及其存在状态。
 	fetcher, ok := r.mtopClient().(mtop.ItemDetailFetcher)
 	if !ok {
-		return nil
+		return outcome
 	}
-	// candidates 保存本次同步必须重新探测的全部商品下标；不复用本地标记或短期缓存，避免单向锁存旧结果。
-	candidates := make([]int, len(items))
-	// index 表示当前待探测商品在列表中的下标。
-	for index := range candidates {
-		candidates[index] = index
-	}
+	// localMultiSpec 保存本地已持久化的多规格标记，探测失败时避免用未确认的结论覆盖已有事实。
+	localMultiSpec := r.localMultiSpecSnapshot(ctx, cookieID)
 	// probeCtx、cancel 控制批量详情探测的收束。
 	probeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// semaphore 限制同时进行的详情探测数量。
-	semaphore := make(chan struct{}, 4)
+	semaphore := make(chan struct{}, multiSpecProbeConcurrency)
 	// waitGroup 等待所有详情探测 goroutine 结束。
 	var waitGroup sync.WaitGroup
-	// errorMu 保护 firstErr 的并发写入。
-	var errorMu sync.Mutex
-	// firstErr 保存首个详情探测错误，普通平台错误也必须阻止后续错误状态覆盖。
-	var firstErr error
+	// stateMu 保护 outcome 的并发写入。
+	var stateMu sync.Mutex
 	// index 表示当前需要启动详情探测的商品下标。
-	for _, index := range candidates {
+	for index := range items {
 		waitGroup.Add(1)
 		go func(index int) {
 			defer waitGroup.Done()
@@ -362,22 +349,87 @@ func (r *ItemSyncRepository) enrichMultiSpec(ctx context.Context, cookies, cooki
 				return
 			}
 			defer func() { <-semaphore }()
+			stateMu.Lock()
+			outcome.Probed++
+			stateMu.Unlock()
 			// isMultiSpec、detectErr 保存当前商品详情探测结果及错误。
 			isMultiSpec, detectErr := fetcher.DetectItemMultiSpec(probeCtx, cookies, items[index].ID)
 			if detectErr != nil {
-				errorMu.Lock()
-				if firstErr == nil {
-					firstErr = detectErr
-					cancel()
+				// fallback、known 保存本地已持久化的多规格标记及其存在状态。
+				fallback, known := localMultiSpec[items[index].ID]
+				if known {
+					items[index].IsMultiSpec = fallback
 				}
-				errorMu.Unlock()
+				stateMu.Lock()
+				outcome.Fallback++
+				if outcome.FirstErr == nil {
+					outcome.FirstErr = detectErr
+				}
+				stateMu.Unlock()
 				return
 			}
 			items[index].IsMultiSpec = isMultiSpec
 		}(index)
 	}
 	waitGroup.Wait()
-	return firstErr
+	return outcome
+}
+
+// reportMultiSpecDegraded 处理多规格探测未全部完成的情况：凭证类错误转交账号恢复，其余只记录告警。
+// 商品多规格只是列表事实的补充，因此这里绝不返回错误，调用方必须继续完成商品落库。
+func (r *ItemSyncRepository) reportMultiSpecDegraded(ctx context.Context, cookieID string, outcome itemSyncEnrichOutcome) {
+	if outcome.FirstErr == nil {
+		return
+	}
+	if mtop.IsCredentialRefreshableErr(outcome.FirstErr) {
+		r.recoverExpired(ctx, cookieID, outcome.FirstErr)
+	}
+	// logger 保存可用的日志器，实例缺失时退化为默认日志器以保证降级过程可观测。
+	logger := r.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("商品多规格探测未全部完成，已沿用本地或列表标记",
+		"account", cookieID, "probed", outcome.Probed, "fallback", outcome.Fallback, "reason", outcome.FirstErr)
+}
+
+// localMultiSpecSnapshot 读取账号下已持久化的商品多规格标记，作为详情探测失败时的兜底事实。
+func (r *ItemSyncRepository) localMultiSpecSnapshot(ctx context.Context, cookieID string) map[string]bool {
+	// snapshot 保存商品标识到多规格标记的映射，查询失败时返回空集合而不是猜测商品事实。
+	snapshot := make(map[string]bool)
+	if r == nil || r.store == nil || r.store.Items == nil {
+		return snapshot
+	}
+	// rows、err 保存本地商品记录及查询错误。
+	rows, err := r.store.Items.AllForCookie(ctx, cookieID)
+	if err != nil {
+		// logger 保存可用的日志器，实例缺失时退化为默认日志器以保证读取失败可观测。
+		logger := r.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("读取本地多规格兜底失败，探测失败时将沿用列表初判", "account", cookieID)
+		return snapshot
+	}
+	// row 表示当前待收录的本地商品记录。
+	for _, row := range rows {
+		snapshot[row.ItemID] = row.IsMultiSpec
+	}
+	return snapshot
+}
+
+// multiSpecProbeConcurrency 是同时进行商品详情探测的最大数量，超出后排队等待。
+const multiSpecProbeConcurrency = 4
+
+// itemSyncEnrichOutcome 描述一轮多规格探测的结果；详情探测只补充列表事实，
+// 失败必须退化为沿用已有标记，因此它携带统计与首个错误，但不再作为同步失败原因。
+type itemSyncEnrichOutcome struct {
+	// FirstErr 保存首个商品详情探测错误，供日志与账号凭证恢复使用。
+	FirstErr error
+	// Probed 保存本轮真正向平台发起的详情探测次数，用于观察接口调用量。
+	Probed int
+	// Fallback 保存因探测失败而改用本地已有多规格标记的商品数量。
+	Fallback int
 }
 
 // withCookieSnapshot 创建带完整 Cookie Jar 或平面 Cookie 的平台上下文。

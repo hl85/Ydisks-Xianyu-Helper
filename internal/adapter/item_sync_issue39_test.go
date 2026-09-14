@@ -255,7 +255,7 @@ func TestItemSyncPageReturnsPersistenceFailure(t *testing.T) {
 	}
 }
 
-// TestItemSyncDetailProbeFailurePreservesExistingFlag 验证普通详情探测错误不会清除既有多规格标记。
+// TestItemSyncDetailProbeFailurePreservesExistingFlag 验证普通详情探测错误只降级为沿用旧标记，既不清除多规格也不中断同步。
 func TestItemSyncDetailProbeFailurePreservesExistingFlag(t *testing.T) {
 	// store、cleanup 保存详情错误测试使用的隔离数据库及释放函数。
 	store, cleanup := newAdapterTestStore(t)
@@ -277,12 +277,13 @@ func TestItemSyncDetailProbeFailurePreservesExistingFlag(t *testing.T) {
 	}
 	// repository 使用真实同步流程验证探测错误传播。
 	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, func(context.Context, string, error) { recoveryCalls++ })
-	// result、syncErr 保存详情探测失败后的同步结果。
+	// result、syncErr 保存详情探测失败后的同步结果；多规格只是补充事实，详情失败必须让商品照常落库。
 	result, syncErr := repository.SyncAll(ctx, itemapp.SyncQuery{UserID: 1, CookieID: "cid", PageSize: 20, MaxPages: 1})
-	// typedErr 保存详情失败映射出的应用阶段错误。
-	var typedErr *itemapp.SyncError
-	if result != (itemapp.SyncAllResult{}) || !errors.As(syncErr, &typedErr) || typedErr.Kind != itemapp.SyncErrorPlatform || recoveryCalls != 0 {
-		t.Fatalf("详情普通错误映射异常 result=%+v err=%v recoveries=%d", result, syncErr, recoveryCalls)
+	if syncErr != nil || result.SavedCount != 1 {
+		t.Fatalf("详情普通错误不应中断同步 result=%+v err=%v", result, syncErr)
+	}
+	if recoveryCalls != 0 {
+		t.Fatalf("普通详情错误不应触发凭证恢复 recoveries=%d", recoveryCalls)
 	}
 	// item、itemErr 验证详情失败时旧多规格标记没有被错误清零。
 	item, itemErr := store.Items.Get(ctx, "cid", "detail-error-item")

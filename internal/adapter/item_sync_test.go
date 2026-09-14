@@ -2,11 +2,13 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"xianyu-go/internal/db"
 	"xianyu-go/internal/xianyu/mtop"
 )
 
@@ -58,9 +60,10 @@ func TestItemSyncRepositoryEnrichMultiSpecBoundsConcurrency(t *testing.T) {
 	for index := range items {
 		items[index].ID = fmt.Sprintf("probe-%d", index)
 	}
-	// err 保存首次批量多规格探测的错误。
-	if err := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", items); err != nil {
-		t.Fatalf("首次多规格探测失败：%v", err)
+	// outcome 保存首次批量多规格探测的次数与首个错误。
+	outcome := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", items)
+	if outcome.FirstErr != nil {
+		t.Fatalf("首次多规格探测失败：%v", outcome.FirstErr)
 	}
 	if maxActive > 4 {
 		t.Fatalf("探测并发=%d，超过上限 4", maxActive)
@@ -77,9 +80,9 @@ func TestItemSyncRepositoryEnrichMultiSpecBoundsConcurrency(t *testing.T) {
 	for index := range secondItems {
 		secondItems[index].ID = fmt.Sprintf("probe-%d", index)
 	}
-	// err 保存第二次多规格探测的校验错误。
-	if err := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", secondItems); err != nil {
-		t.Fatalf("第二次多规格探测失败：%v", err)
+	// secondOutcome 保存第二次多规格探测的结果，当前仓库尚未启用复用缓存，因此必须重新探测。
+	if secondOutcome := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", secondItems); secondOutcome.FirstErr != nil {
+		t.Fatalf("第二次多规格探测失败：%v", secondOutcome.FirstErr)
 	}
 	if probeCalls != len(items)*2 {
 		t.Fatalf("第二次同步未重新探测，探测次数=%d，期望=%d", probeCalls, len(items)*2)
@@ -102,9 +105,9 @@ func TestItemSyncRepositoryEnrichMultiSpecFollowsRemoteBothDirections(t *testing
 	// items 保存第一次同步前仍带有旧多规格标记的商品。
 	items := []mtop.ItemListItem{{ID: "changing-item", IsMultiSpec: true}}
 	remoteValue = false
-	// err 保存多规格转单规格的详情探测错误。
-	if err := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", items); err != nil {
-		t.Fatalf("多规格转单规格探测失败：%v", err)
+	// firstOutcome 保存多规格转单规格的详情探测结果。
+	if firstOutcome := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", items); firstOutcome.FirstErr != nil {
+		t.Fatalf("多规格转单规格探测失败：%v", firstOutcome.FirstErr)
 	}
 	if items[0].IsMultiSpec {
 		t.Fatal("远端已变为单规格，但同步结果仍保留旧多规格标记")
@@ -112,11 +115,47 @@ func TestItemSyncRepositoryEnrichMultiSpecFollowsRemoteBothDirections(t *testing
 	// secondItems 保存第二次同步前带有旧单规格标记的同一商品。
 	secondItems := []mtop.ItemListItem{{ID: "changing-item", IsMultiSpec: false}}
 	remoteValue = true
-	// err 保存单规格转多规格的详情探测错误。
-	if err := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", secondItems); err != nil {
-		t.Fatalf("单规格转多规格探测失败：%v", err)
+	// secondOutcome 保存单规格转多规格的详情探测结果。
+	if secondOutcome := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", secondItems); secondOutcome.FirstErr != nil {
+		t.Fatalf("单规格转多规格探测失败：%v", secondOutcome.FirstErr)
 	}
 	if !secondItems[0].IsMultiSpec {
 		t.Fatal("远端已变为多规格，但同步结果仍保留旧单规格标记")
+	}
+}
+
+// TestItemSyncRepositoryEnrichMultiSpecFailureKeepsLocalValue 验证详情探测失败时同步不被中断，且沿用本地已确认的多规格标记。
+func TestItemSyncRepositoryEnrichMultiSpecFailureKeepsLocalValue(t *testing.T) {
+	// store、cleanup 保存本次验证使用的隔离数据库与清理责任。
+	store, cleanup := newAdapterTestStore(t)
+	defer cleanup()
+	// upsertErr 保存本地多规格事实的写入错误。
+	if upsertErr := store.Items.Upsert(context.Background(), &db.ItemInfoRow{CookieID: "cid", ItemID: "local-item", ItemTitle: "本地商品", IsMultiSpec: true}); upsertErr != nil {
+		t.Fatalf("准备本地多规格事实失败：%v", upsertErr)
+	}
+	// probeCalls 保存平台详情探测次数，验证失败后不会无限重试同一批商品。
+	probeCalls := 0
+	// client 是恒定返回平台失败的详情探测替身。
+	client := &itemSyncDetailClient{detect: func(_ context.Context, _ string, _ string) (bool, error) {
+		probeCalls++
+		return false, errors.New("商品详情接口返回非成功")
+	}}
+	// repository 是使用详情探测替身的商品同步适配器。
+	repository := NewItemSyncRepository(store, func() mtop.Client { return client }, nil, nil, nil)
+	// items 保存列表初判为单规格、但本地已确认是多规格的商品。
+	items := []mtop.ItemListItem{{ID: "local-item", IsMultiSpec: false}}
+	// outcome 保存本轮多规格探测的降级结果。
+	outcome := repository.enrichMultiSpec(context.Background(), "unb=1; _m_h5_tk=t_1;", "cid", items)
+	if outcome.FirstErr == nil {
+		t.Fatal("详情探测失败时未记录首个错误")
+	}
+	if outcome.Fallback != 1 {
+		t.Fatalf("降级计数=%d，期望=1", outcome.Fallback)
+	}
+	if !items[0].IsMultiSpec {
+		t.Fatal("详情探测失败应沿用本地已确认的多规格标记，避免用列表初判覆盖平台事实")
+	}
+	if probeCalls != 1 {
+		t.Fatalf("单品失败仍发起了 %d 次探测，期望=1", probeCalls)
 	}
 }
