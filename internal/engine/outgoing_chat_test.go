@@ -206,6 +206,10 @@ func TestAutomationSendTextEchoTimeoutIsUncertain(t *testing.T) {
 	if err == nil || !errors.Is(err, errOutgoingEchoUnconfirmed) {
 		t.Fatalf("回显超时错误=%v，期望不确定错误", err)
 	}
+	// 超时原因本身就是不确定原因，错误文本不得自我重复：它会原样进入运行错误字段与人工核对面板。
+	if err.Error() != errOutgoingEchoUnconfirmed.Error() {
+		t.Fatalf("回显超时错误文本=%q，期望 %q", err.Error(), errOutgoingEchoUnconfirmed.Error())
+	}
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
 	if len(conn.sentTexts) != 1 {
