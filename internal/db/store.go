@@ -44,8 +44,10 @@ type Store struct {
 	SecurityAudit *SecurityAuditLogs
 	Chats         *ChatStore
 	AccountTasks  *AccountTaskStore
-	Admin         *AdminQueries
-	Analytics     *AnalyticsQueries
+	// SkipPinItems 保存拼团小刀自动免拼的商品名单；与登录凭证无关的运营配置。
+	SkipPinItems *SkipPinItems
+	Admin        *AdminQueries
+	Analytics    *AnalyticsQueries
 
 	credentialMu    sync.Mutex
 	credentialLocks map[string]*credentialLockEntry
@@ -107,6 +109,7 @@ func NewStore(db *sql.DB, dialect Dialect) *Store {
 		SecurityAudit:     &SecurityAuditLogs{DB: db},
 		Chats:             &ChatStore{DB: db, Dialect: dialect},
 		AccountTasks:      &AccountTaskStore{DB: db, Dialect: dialect},
+		SkipPinItems:      &SkipPinItems{DB: db, Dialect: dialect},
 		Admin:             &AdminQueries{DB: db},
 		Analytics:         &AnalyticsQueries{DB: db, Dialect: dialect},
 		credentialLocks:   make(map[string]*credentialLockEntry),

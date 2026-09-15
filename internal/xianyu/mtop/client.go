@@ -78,7 +78,9 @@ type ClientImpl struct {
 	TokenURL   string
 	ConsignURL string
 	// AdjustPriceURL 覆盖订单改价端点，仅供测试注入本地 HTTP 服务。
-	AdjustPriceURL      string
+	AdjustPriceURL string
+	// SkipPinURL 覆盖拼团小刀免拼端点，仅供测试注入本地 HTTP 服务。
+	SkipPinURL          string
 	OrderDetailURL      string
 	SoldOrdersURL       string
 	ItemDetailURL       string
