@@ -187,6 +187,8 @@ type HTTPDependencies struct {
 	Logger *slog.Logger
 	// DatabaseHealth 是健康检查使用的窄数据库探测 Port。
 	DatabaseHealth server.DatabaseHealthPort
+	// SkipPinSettings 是拼团小刀自动免拼名单的读写 Port。
+	SkipPinSettings server.SkipPinSettingsPort
 }
 
 // ServerDependencies 将组合层服务投影为 HTTP Server 需要的不可变最小 Port 快照。
@@ -214,6 +216,7 @@ func ServerDependencies(services *composition.Services, base HTTPDependencies, s
 			PasswordLogin: ports.PasswordLogin, AccountDelete: ports.AccountDelete, AccountProfile: ports.AccountProfile,
 			AccountLongLogin: ports.AccountLongLogin, AccountSettings: ports.AccountSettings, AccountRuntime: ports.AccountRuntime,
 			AccountSummaries: ports.AccountSummaries, AccountTasks: ports.AccountTasks, Chat: ports.Chat,
+			SkipPinSettings:        base.SkipPinSettings,
 			UncertainNotifications: ports.UncertainNotifications, NotificationChannels: ports.NotificationChannels,
 			Analytics: ports.Analytics, AutomationIssues: ports.AutomationIssues, AutomationRules: ports.AutomationRules, DeliveryTemplates: ports.DeliveryTemplates,
 			Cards: ports.Cards, APIRequestTester: ports.APICardTester, PublishAutomationRules: ports.PublishAutomationRules, DefaultReplies: ports.DefaultReplies,

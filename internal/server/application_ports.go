@@ -18,7 +18,20 @@ import (
 	notificationsapp "xianyu-go/internal/application/notifications"
 	orderapp "xianyu-go/internal/application/orders"
 	settingsapp "xianyu-go/internal/application/settings"
+
+	"xianyu-go/internal/db"
 )
+
+// SkipPinSettingsPort 定义拼团小刀自动免拼商品名单 HTTP 接口所需的最小能力。
+// 由组合根注入 db.SkipPinItems 实现；server 层只消费本接口，不直接触碰 SQL。
+type SkipPinSettingsPort interface {
+	// List 返回某账号的全部名单条目（含停用），供界面展示。
+	List(ctx context.Context, cookieID string) ([]db.SkipPinItem, error)
+	// Upsert 新增或更新一条名单（enabled 决定开关）。
+	Upsert(ctx context.Context, cookieID, itemID string, enabled bool) error
+	// Delete 移除一条名单；条目不存在视为已删除。
+	Delete(ctx context.Context, cookieID, itemID string) error
+}
 
 // AccountLoginResult 是账号登录持久化后可供 HTTP 响应使用的非敏感结果。
 type AccountLoginResult struct {
@@ -422,6 +435,8 @@ type ApplicationPorts struct {
 	accountSummaries AccountSummaryPort
 	// accountTasks 是账号自动化任务用例。
 	accountTasks AccountTasksPort
+	// skipPinSettings 是拼团小刀自动免拼名单用例。
+	skipPinSettings SkipPinSettingsPort
 	// chat 是聊天应用用例。
 	chat ChatPort
 	// uncertainNotifications 是通知不确定状态用例。
@@ -480,6 +495,7 @@ type ApplicationPortsInput struct {
 	AccountRuntime              AccountRuntimePort
 	AccountSummaries            AccountSummaryPort
 	AccountTasks                AccountTasksPort
+	SkipPinSettings             SkipPinSettingsPort
 	Chat                        ChatPort
 	UncertainNotifications      UncertainNotificationsPort
 	NotificationChannels        NotificationChannelsPort
@@ -508,7 +524,7 @@ func NewApplicationPorts(input ApplicationPortsInput) *ApplicationPorts {
 		platformCredentials: input.PlatformCredentials, authentication: input.Authentication, loginAudit: input.LoginAudit,
 		passwordLogin: input.PasswordLogin, accountDelete: input.AccountDelete, accountProfile: input.AccountProfile,
 		accountLongLogin: input.AccountLongLogin, accountSettings: input.AccountSettings, accountRuntime: input.AccountRuntime,
-		accountSummaries: input.AccountSummaries, accountTasks: input.AccountTasks, chat: input.Chat,
+		accountSummaries: input.AccountSummaries, accountTasks: input.AccountTasks, skipPinSettings: input.SkipPinSettings, chat: input.Chat,
 		uncertainNotifications: input.UncertainNotifications, notificationChannels: input.NotificationChannels,
 		analytics: input.Analytics, automationIssues: input.AutomationIssues, automationRules: input.AutomationRules,
 		cards: input.Cards, deliveryTemplates: input.DeliveryTemplates, apiRequestTester: input.APIRequestTester, publishAutomationRules: input.PublishAutomationRules, defaultReplies: input.DefaultReplies,
@@ -602,6 +618,11 @@ func (server *Server) cardsApplication() CardsPort {
 // accountTaskApplication 返回账号自动化任务用例。
 func (server *Server) accountTaskApplication() AccountTasksPort {
 	return server.applicationServiceSet().accountTasks
+}
+
+// skipPinSettingsApplication 返回拼团小刀自动免拼名单用例。
+func (server *Server) skipPinSettingsApplication() SkipPinSettingsPort {
+	return server.applicationServiceSet().skipPinSettings
 }
 
 // automationIssuesApplication 返回自动化异常用例。
