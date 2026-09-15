@@ -639,10 +639,23 @@ func IsSessionExpiredErr(err error) bool {
 		strings.Contains(msg, "登录凭证已失效")
 }
 
-// IsCredentialRefreshableErr 判断错误是否表示当前 Cookie 凭证需要进入统一恢复流程。
-// 仅 MTOP 签名 Token 过期可以先刷新登录态 Cookie；Session 失效则按原有协议续期或重新登录处理。
+// ErrMissingSignToken 表示请求所需的 Cookie 中缺少 MTOP 签名令牌 _m_h5_tk。
+//
+// 该状态与登录凭证是否有效无关：签名令牌由 Token 接口随时补发，也会随任意 MTOP 响应轮换。
+// 因此它属于「可即时修复的请求前置条件」，调用方必须先尝试刷新令牌并按原请求重试，
+// 而不是把它当成终态失败——否则依赖数据库凭证做 MTOP 调用的定时任务（如自动评价）会在
+// 令牌被其他流程覆盖后持续失败，只能等某个无关的 MTOP 请求恰好把令牌写回才能自愈。
+var ErrMissingSignToken = errors.New("cookie 缺少 _m_h5_tk")
+
+// IsCredentialRefreshableErr 判断错误是否属于可通过账号级凭证恢复处理的凭证失效。
+// 注意：签名令牌缺失不在此列——它不该触发密码登录级别的重试，只需刷新令牌接口即可。
 func IsCredentialRefreshableErr(err error) bool {
 	return IsSessionExpiredErr(err) || IsMTopTokenExpiredErr(err)
+}
+
+// IsMissingSignTokenErr 判断错误是否为缺少 MTOP 签名令牌，供调用方选择「刷新令牌后重试」。
+func IsMissingSignTokenErr(err error) bool {
+	return errors.Is(err, ErrMissingSignToken)
 }
 
 // mtopString 封装mtopString业务协调。

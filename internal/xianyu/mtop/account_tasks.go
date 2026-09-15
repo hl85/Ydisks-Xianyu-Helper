@@ -204,7 +204,10 @@ func (c *ClientImpl) accountTaskRequest(ctx context.Context, cookiesStr, endpoin
 			failure = c.mtopResponseFailure(api, http.StatusOK, decoded.Ret, "")
 		}
 		lastFailure = failure
-		if !IsMTopTokenExpiredErr(failure) {
+		// 缺少签名令牌与令牌过期同属「刷新令牌即可继续」的前置条件，必须都进入下面的刷新分支。
+		// 若把缺令牌当作终态失败直接返回，依赖数据库凭证的定时任务会在令牌被其他流程覆盖后
+		// 持续失败，只能等某个无关的 MTOP 请求恰好把令牌写回才能恢复。
+		if !IsMTopTokenExpiredErr(failure) && !IsMissingSignTokenErr(failure) {
 			return nil, updated, failure
 		}
 		if updated != "" {
@@ -243,7 +246,7 @@ func (c *ClientImpl) accountTaskRequestOnce(ctx context.Context, cookiesStr, end
 	// token 用于本次流程后续判断的令牌
 	token := protocol.SignToken(signingCookies)
 	if token == "" {
-		return nil, cookiesStr, fmt.Errorf("cookie 缺少 _m_h5_tk，无法调用 %s", api)
+		return nil, cookiesStr, fmt.Errorf("%w，无法调用 %s", ErrMissingSignToken, api)
 	}
 	// rawData、err 用于本次流程后续判断的原始Data、err
 	rawData, err := json.Marshal(data)

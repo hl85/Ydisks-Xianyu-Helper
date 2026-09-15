@@ -72,7 +72,8 @@ func (c *ClientImpl) FetchSoldOrdersPage(ctx context.Context, cookies string, pa
 		if err == nil {
 			return page, nil
 		}
-		if !IsMTopTokenExpiredErr(err) {
+		// 缺少签名令牌与令牌过期同属「刷新令牌即可继续」的前置条件，需进入下方刷新分支。
+		if !IsMTopTokenExpiredErr(err) && !IsMissingSignTokenErr(err) {
 			return nil, err
 		}
 		lastFailure = err
@@ -86,7 +87,8 @@ func (c *ClientImpl) FetchSoldOrdersPage(ctx context.Context, cookies string, pa
 			// refreshed、refreshErr 保存主动刷新 MTOP 签名 Token 的结果及错误。
 			refreshed, refreshErr := c.RefreshTokenContext(ctx, currentCookies)
 			if refreshErr != nil {
-				return nil, fmt.Errorf("订单列表 Token 过期且刷新失败: %w", refreshErr)
+				// 补齐失败时保留原始缺令牌原因，调用方与告警仍可按既有文本定位。
+				return nil, errors.Join(err, fmt.Errorf("订单列表 Token 补齐失败: %w", refreshErr))
 			}
 			currentCookies = refreshed.UpdatedCookies
 		}
@@ -119,7 +121,7 @@ func (c *ClientImpl) fetchSoldOrdersPageOnce(ctx context.Context, cookies string
 	// token 是仅在当前请求内参与签名的明文令牌，禁止记录。
 	token := protocol.SignToken(signingCookies)
 	if token == "" {
-		return nil, fmt.Errorf("cookie 缺少 _m_h5_tk，无法获取订单列表")
+		return nil, fmt.Errorf("%w，无法获取订单列表", ErrMissingSignToken)
 	}
 	// payload 保留当前卖家工作台查询全部订单的唯一请求格式。
 	payload := map[string]any{
