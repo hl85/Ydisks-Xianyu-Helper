@@ -8,6 +8,7 @@ CircleDollarSign,
 Clock3,
 Edit,
 Layers3,
+Sparkles,
 MessageCircle,
 Plus,
 RefreshCw,
@@ -787,7 +788,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                         </p>
                       </div>
                     </section>
-                  ) : currentTrigger !== 'review_missing_timeout' ? (
+                  ) : currentTrigger !== 'review_missing_timeout' && currentTrigger !== 'order_pin_pending' ? (
                     <section className="bg-white rounded-3xl border border-gray-100 p-5">
                       <div className="flex items-start justify-between gap-4 mb-4">
                         <div>
@@ -917,7 +918,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                         ))}
                       </div>
                     </section>
-                  ) : (
+                  ) : currentTrigger === 'review_missing_timeout' ? (
                     <section className="bg-white rounded-3xl border border-gray-100 p-5">
                       <div className="flex items-center gap-2 mb-4">
                         <Clock3 className="w-5 h-5 text-amber-600" />
@@ -982,6 +983,20 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                             className="w-full ios-input px-4 py-3 rounded-xl h-28 resize-none"
                           />
                         </div>
+                      </div>
+                    </section>
+                  ) : (
+                    <section className="bg-white rounded-3xl border border-gray-100 p-5">
+                      <div className="flex items-center gap-2 mb-4">
+                        <Sparkles className="w-5 h-5 text-sky-600" />
+                        <h4 className="font-black text-gray-900">免拼设置</h4>
+                      </div>
+                      <div className="rounded-2xl bg-sky-50 border border-sky-100 p-4">
+                        <p className="text-xs leading-5 text-sky-700">
+                          免拼动作无需额外配置：买家拍下并支付小刀单后，系统在订单同步发现待刀成状态时自动点「直接免拼」，
+                          平台回写「已成功小刀，待发货」后由付款发货规则自动发货。
+                          选择「账号级规则（不限定商品）」时对账号下全部商品生效；商品不支持拼单时不会产生待刀成订单，全局规则同样安全。
+                        </p>
                       </div>
                     </section>
                   )}
