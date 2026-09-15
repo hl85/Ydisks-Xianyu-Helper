@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	orderapp "xianyu-go/internal/application/orders"
+	"xianyu-go/internal/automation"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/xianyu/mtop"
 )
@@ -14,12 +15,20 @@ import (
 type orderRuntimeAutomationFake struct {
 	// calls 记录自动化完整发货调用次数。
 	calls int
+	// tasks 记录交给自动化中心匹配的系统事件。
+	tasks []automation.Task
 }
 
 // ManualFullDelivery 返回固定发送数量，验证 adapter 的订单模型转换回调。
 func (f *orderRuntimeAutomationFake) ManualFullDelivery(context.Context, *db.Order) (int, error) {
 	f.calls++
 	return 2, nil
+}
+
+// HandleTask 记录系统事件并返回成功，验证待刀成事件能交付自动化中心。
+func (f *orderRuntimeAutomationFake) HandleTask(_ context.Context, task automation.Task) error {
+	f.tasks = append(f.tasks, task)
+	return nil
 }
 
 // orderRuntimeNotifierFake 是订单运行时测试使用的通知能力替身。

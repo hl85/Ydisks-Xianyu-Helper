@@ -99,31 +99,6 @@ export const updateAccountTaskSettings = async (id: string, settings: AccountTas
 export const runAccountTask = async (id: string, taskType: 'auto_rate' | 'auto_polish', options?: RequestControlOptions): Promise<AccountTaskRunResponseEnvelope> =>
 	runContractRequest(/* signal 控制账号计划任务立即执行的取消和长超时。 */ signal => contractClient.POST('/api/v1/account-tasks/{cid}/run', { params: { path: { cid: id } }, body: { task_type: taskType }, signal }), { timeoutMs: 120_000, ...options });
 
-/** SkipPinEntry 表示小刀自动免拼名单中的一个商品条目。 */
-export interface SkipPinEntry {
-	/** item_id 表示闲鱼商品 ID。 */ item_id: string;
-	/** enabled 表示该商品当前是否启用自动免拼。 */ enabled: boolean;
-	/** created_at 表示首次登记时间（Unix 秒）。 */ created_at: number;
-	/** updated_at 表示最近一次变更时间（Unix 秒）。 */ updated_at: number;
-}
-
-/** SkipPinListResponse 表示名单读取响应。 */
-export interface SkipPinListResponse {
-	/** items 表示全部名单条目。 */ items: SkipPinEntry[];
-}
-
-// listSkipPinSettings 读取账号的小刀自动免拼名单。
-export const listSkipPinSettings = async (id: string, options?: RequestControlOptions): Promise<SkipPinListResponse> =>
-	runContractRequest(/* signal 控制小刀免拼名单读取的取消和超时。 */ signal => contractClient.GET('/api/v1/accounts/{cid}/skip-pin', { params: { path: { cid: id } }, signal }), options);
-
-// upsertSkipPinSetting 新增或更新名单条目；enabled 缺省视为启用。
-export const upsertSkipPinSetting = async (id: string, itemId: string, enabled: boolean, options?: RequestControlOptions): Promise<{ ok: boolean }> =>
-	runContractRequest(/* signal 控制小刀免拼名单写入的取消和超时。 */ signal => contractClient.PUT('/api/v1/accounts/{cid}/skip-pin', { params: { path: { cid: id } }, body: { item_id: itemId, enabled }, signal }), options);
-
-// deleteSkipPinSetting 从名单移除商品；幂等。
-export const deleteSkipPinSetting = async (id: string, itemId: string, options?: RequestControlOptions): Promise<{ ok: boolean }> =>
-	runContractRequest(/* signal 控制小刀免拼名单删除的取消和超时。 */ signal => contractClient.DELETE('/api/v1/accounts/{cid}/skip-pin/{item_id}', { params: { path: { cid: id, item_id: itemId } }, signal }), options);
-
 
 export interface AccountRuntimeStatus {
   /** state 表示状态。 */ state: NonNullable<AccountDetail['runtime_state']>;

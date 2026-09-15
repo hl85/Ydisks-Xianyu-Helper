@@ -1,6 +1,6 @@
 import { CalendarClock,Loader2,MessageSquareQuote,Play,Save,Sparkles,X } from 'lucide-react';
 import React from 'react';
-import { AccountDetail,AccountTaskSettings,deleteSkipPinSetting,listSkipPinSettings,SkipPinEntry,upsertSkipPinSetting } from '../api';
+import { AccountDetail,AccountTaskSettings } from '../api';
 import { useAccountAutomation } from '../accountAutomationHooks';
 
 interface Props {
@@ -16,106 +16,6 @@ const Toggle: React.FC<{/** checked 表示开关当前是否选中。 */ checked
     <span className={`absolute left-1 top-1 h-6 w-6 rounded-full bg-white shadow-sm transition-transform ${checked ? 'translate-x-6' : ''}`} />
   </button>
 );
-
-// SkipPinSection 渲染小刀自动免拼名单管理区块。
-const SkipPinSection: React.FC<{/** accountId 表示账号 ID。 */ accountId: string}> = ({ accountId }) => {
-  // entries 是当前名单。
-  const [entries, setEntries] = React.useState<SkipPinEntry[]>([]);
-  // loading 表示名单读取中。
-  const [loading, setLoading] = React.useState(true);
-  // busy 表示任一写操作进行中。
-  const [busy, setBusy] = React.useState(false);
-  // newItemId 是输入框中的商品 ID。
-  const [newItemId, setNewItemId] = React.useState('');
-  // error 是操作失败提示。
-  const [error, setError] = React.useState('');
-
-  // load 拉取最新名单。
-  const load = React.useCallback(/* 当前回调处理用户交互或异步状态变化。 */async () => {
-    setLoading(true);
-    try {
-      // res 是名单接口返回。
-      const res = await listSkipPinSettings(accountId);
-      setEntries(res.items);
-      setError('');
-    } catch {
-      setError('名单读取失败，请稍后重试');
-    } finally {
-      setLoading(false);
-    }
-  }, [accountId]);
-
-  React.useEffect(() => { void load(); }, [load]);
-
-  // mutate 执行写操作并刷新名单。
-  const mutate = /* 当前回调处理用户交互或异步状态变化。 */async (action: () => Promise<unknown>) => {
-    setBusy(true);
-    try {
-      await action();
-      await load();
-      setError('');
-    } catch {
-      setError('操作失败，请稍后重试');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // addItem 登记新商品（仅接受数字 ID）。
-  const addItem = () => {
-    // itemId 是规范化后的商品 ID。
-    const itemId = newItemId.trim();
-    if (!itemId || !/^\d+$/.test(itemId)) {
-      setError('请输入数字商品 ID');
-      return;
-    }
-    setNewItemId('');
-    void mutate(/* 当前回调处理用户交互或异步状态变化。 */() => upsertSkipPinSetting(accountId, itemId, true));
-  };
-
-  return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-5">
-      <div className="flex items-start gap-4">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-50 text-sky-600"><Sparkles className="h-5 w-5" /></div>
-        <div className="min-w-0 flex-1">
-          <h4 className="font-black text-slate-900">小刀自动免拼</h4>
-          <p className="mt-1 text-xs leading-5 text-slate-500">买家拍下名单内商品的小刀单后，系统自动点「直接免拼」并随即自动发货，无需人工盯守。</p>
-          <div className="mt-4 flex items-center gap-2">
-            <input aria-label="商品 ID" inputMode="numeric" placeholder="输入商品 ID（纯数字）" value={newItemId}
-              onChange={/* 当前回调处理用户交互或异步状态变化。 */ event => setNewItemId(event.target.value)}
-              onKeyDown={/* 当前回调处理用户交互或异步状态变化。 */ event => { if (event.key === 'Enter') { addItem(); } }}
-              className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-800 placeholder:font-normal placeholder:text-slate-400 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100" />
-            <button type="button" disabled={busy || !newItemId.trim()} onClick={/* 当前回调处理用户交互或异步状态变化。 */ () => addItem()}
-              className="shrink-0 rounded-xl bg-sky-500 px-4 py-2 text-xs font-extrabold text-white hover:bg-sky-600 disabled:opacity-50">添加</button>
-          </div>
-          {loading && <div className="mt-3 text-xs text-slate-400">名单读取中...</div>}
-          {error && <div className="mt-3 text-xs font-medium text-red-600">{error}</div>}
-          {!loading && entries.length === 0 && <div className="mt-3 text-xs text-slate-400">名单为空：登记商品后，该商品的小刀单将自动免拼。</div>}
-          {entries.length > 0 && (
-            <ul className="mt-3 space-y-2">
-              {entries.map(/* 当前回调处理用户交互或异步状态变化。 */entry => (
-                <li key={entry.item_id} className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-extrabold text-slate-800">{entry.item_id}</div>
-                    <div className="text-[11px] text-slate-400">登记于 {new Date(entry.created_at * 1000).toLocaleString('zh-CN')}</div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Toggle checked={entry.enabled} label={`商品 ${entry.item_id} 自动免拼开关`} onChange={/* 当前回调处理用户交互或异步状态变化。 */() => void mutate(/* 当前回调处理用户交互或异步状态变化。 */() => upsertSkipPinSetting(accountId, entry.item_id, !entry.enabled))} />
-                    <button type="button" disabled={busy} aria-label={`移除商品 ${entry.item_id}`}
-                      onClick={/* 当前回调处理用户交互或异步状态变化。 */() => void mutate(/* 当前回调处理用户交互或异步状态变化。 */() => deleteSkipPinSetting(accountId, entry.item_id))}
-                      className="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50">
-                      <X className="h-4 w-4" />
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-};
 
 // AccountAutomationModal 渲染账号自动化设置弹窗。
 const AccountAutomationModal: React.FC<Props> = ({ account, onClose, onSaved }) => {
@@ -188,8 +88,6 @@ const AccountAutomationModal: React.FC<Props> = ({ account, onClose, onSaved }) 
               </div>
             </div>
           </section>
-
-          <SkipPinSection accountId={account.id} />
 
           {summary && (
             <div className="rounded-xl border border-sky-100 bg-sky-50 px-4 py-3 text-sm text-sky-900">

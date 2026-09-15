@@ -21,6 +21,10 @@ const (
 	TriggerOrderPaid            = "order_paid"
 	TriggerBuyerReviewed        = "buyer_reviewed"
 	TriggerReviewMissingTimeout = "review_missing_timeout"
+	// TriggerOrderPinPending 表示订单同步发现处于待刀成状态的拼团订单。
+	// 该事件由订单同步轮询产生（平台无此类卡片推送），交给自动化规则匹配：
+	// 命中小刀免拼动作即自动点「直接免拼」，支持按商品登记或账号全局规则。
+	TriggerOrderPinPending = "order_pin_pending"
 
 	ActionConfirmShipment = "confirm_shipment"
 	ActionSendCard        = "send_card"
@@ -29,6 +33,9 @@ const (
 	ActionSendText     = "send_text"
 	// ActionAdjustPrice 表示把待付款订单价格修改为动作配置中的目标价格。
 	ActionAdjustPrice = "adjust_price"
+	// ActionSkipPin 表示对处于待刀成状态的拼团订单调用「直接免拼」接口，
+	// 免拼成功后平台回写「已成功小刀，待发货」，既有付款发货链路随即接管。
+	ActionSkipPin = "skip_pin"
 )
 
 // Task 是自动化中心的统一输入。它可以来自 WS 系统事件、计划任务或手动触发。

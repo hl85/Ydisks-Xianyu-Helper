@@ -128,6 +128,9 @@ func (e *automationActionExecutor) executeActionWithProof(ctx context.Context, t
 		// sent、err 保存订单改价动作的结果数量和错误。
 		sent, err := e.adjustOrderPrice(ctx, task, action)
 		return actionExecutionResult{sent: sent}, err
+	case ActionSkipPin:
+		// 平台免拼接口幂等，执行失败可安全进入通用恢复重试；成功不产生买家可见消息。
+		return actionExecutionResult{}, e.skipPinOrder(ctx, task, true)
 	case ActionSendCard:
 		return e.sendCardWithProof(ctx, task, action)
 	case ActionSendTemplate:

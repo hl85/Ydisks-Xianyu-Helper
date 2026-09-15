@@ -58,6 +58,7 @@ func (s *Server) listSkipPinSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// items、err 是名单条目与读取错误。
+	// items、err 是名单条目与读取错误。
 	items, err := port.List(r.Context(), cid)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "读取小刀免拼名单失败")
@@ -65,6 +66,7 @@ func (s *Server) listSkipPinSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	// entries 是响应 DTO 列表。
 	entries := make([]skipPinEntry, 0, len(items))
+	// item 表示当前遍历过程中的名单条目。
 	for _, item := range items {
 		entries = append(entries, skipPinEntry{ItemID: item.ItemID, Enabled: item.Enabled, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt})
 	}
@@ -99,6 +101,7 @@ func (s *Server) upsertSkipPinSetting(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "商品 ID 不能为空")
 		return
 	}
+	// err 是商品 ID 数字格式校验错误。
 	if _, err := strconv.ParseInt(itemID, 10, 64); err != nil {
 		writeErr(w, http.StatusBadRequest, "商品 ID 必须是数字")
 		return
@@ -114,6 +117,7 @@ func (s *Server) upsertSkipPinSetting(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	// err 是名单写入错误。
 	if err := port.Upsert(r.Context(), cid, itemID, enabled); err != nil {
 		writeErr(w, http.StatusInternalServerError, "保存小刀免拼名单失败")
 		return
@@ -141,6 +145,7 @@ func (s *Server) deleteSkipPinSetting(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "小刀免拼名单未初始化")
 		return
 	}
+	// err 是名单删除错误。
 	if err := port.Delete(r.Context(), cid, itemID); err != nil {
 		writeErr(w, http.StatusInternalServerError, "删除小刀免拼名单失败")
 		return
