@@ -159,6 +159,8 @@ func (s *Server) Router() chi.Router {
 		// 账号 cookie
 		s.mountCookies(r)
 		s.mountAccountTasks(r)
+		// 拼团小刀自动免拼名单
+		s.mountSkipPinSettings(r)
 		// 在线聊天（历史 REST + 应用层 WebSocket）
 		s.mountChat(r)
 		// 扫码登录

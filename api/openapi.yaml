@@ -547,7 +547,162 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  "/api/v1/accounts/{cid}/skip-pin":
+    get:
+      operationId: getApiV1AccountsBycidSkipPin
+      summary: getApiV1AccountsBycidSkipPin
+      parameters:
+          - name: cid
+            in: path
+            required: true
+            schema:
+              type: string
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkipPinListResponse'
+        '400':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      operationId: putApiV1AccountsBycidSkipPin
+      summary: putApiV1AccountsBycidSkipPin
+      parameters:
+          - name: cid
+            in: path
+            required: true
+            schema:
+              type: string
+      security: [{cookieAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SkipPinUpsertRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkipPinMutationResponse'
+        '400':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  "/api/v1/accounts/{cid}/skip-pin/{item_id}":
+    delete:
+      operationId: deleteApiV1AccountsBycidSkipPinByitem_id
+      summary: deleteApiV1AccountsBycidSkipPinByitem_id
+      parameters:
+          - name: cid
+            in: path
+            required: true
+            schema:
+              type: string
+          - name: item_id
+            in: path
+            required: true
+            schema:
+              type: string
+      security: [{cookieAuth: []}]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkipPinMutationResponse'
+        '400':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 统一错误响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   "/api/v1/accounts/{cid}/login-info":
+
     put:
       operationId: putApiV1AccountsBycidLoginInfo
       summary: putApiV1AccountsBycidLoginInfo
@@ -8173,6 +8328,40 @@ components:
         auto_consign:
           type: boolean
           description: 自动发货后是否自动确认发货（转已发货）；省略时保持不变
+    SkipPinEntry:
+      type: object
+      required: [item_id, enabled, created_at, updated_at]
+      properties:
+        item_id:
+          type: string
+        enabled:
+          type: boolean
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+    SkipPinListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkipPinEntry'
+    SkipPinUpsertRequest:
+      type: object
+      required: [item_id]
+      properties:
+        item_id:
+          type: string
+        enabled:
+          type: boolean
+    SkipPinMutationResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
     AutoConfirmResponse:
       type: object
       required: [auto_confirm, auto_consign]
