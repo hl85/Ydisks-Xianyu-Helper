@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/xianyu/mtop"
 )
 
 // apiRenewEnabled 读取 API Cookie 续期开关，并在设置缺失时保留安全默认值。
@@ -65,6 +66,11 @@ Cookie 明文只在本次调用链中短暂存在。
 
 // saveRenewedCookies 封装saveRenewedCookies业务协调。
 func (s *Scheduler) saveRenewedCookies(ctx context.Context, cookieID, cookieStr, metadata string) bool {
+	// 续期响应不经过 MTOP 签名流程，产出不含 _m_h5_tk 的 Cookie 属预期；但它会整体覆盖
+	// 数据库凭证，使依赖该凭证的定时任务失去签名能力。此处只在缺失时告警，据此定位来源。
+	if !mtop.SignTokenPresent(cookieStr) {
+		s.logger.Warn("续期写入的 Cookie 不含 MTOP 签名令牌", "account", cookieID, "source", "renewal")
+	}
 	if // err 用于本次流程后续判断的err
 	err := s.store.Cookies.UpdateRenewalCookie(ctx, cookieID, cookieStr, metadata, time.Now().Unix()); err != nil {
 		s.logger.Warn("保存续期 Cookie 失败", "account", cookieID, "err", err)

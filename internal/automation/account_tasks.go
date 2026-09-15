@@ -678,6 +678,11 @@ func (c *accountTaskCoordinator) persistTaskCredentialLocked(ctx context.Context
 	if value == data.Value && metadata == data.MetadataJSON {
 		return data.Value, nil
 	}
+	// 账号任务写回的是本轮会话的 Cookie；缺失签名令牌说明本会话未吸收到令牌，
+	// 记录来源便于区分是任务自身还是其他写回路径造成了覆盖。
+	if !mtop.SignTokenPresent(value) {
+		c.logger.Warn("账号任务写回的 Cookie 不含 MTOP 签名令牌", "account", accountID, "source", "account-task")
+	}
 	// writer、ok 区分生产完整凭证仓储与旧测试仓储，二者都在相同版本校验后写回。
 	if writer, ok := c.repository.(accountTaskCookieWriter); ok {
 		err = writer.UpdateRenewalCookie(ctx, accountID, value, metadata, time.Now().Unix())
