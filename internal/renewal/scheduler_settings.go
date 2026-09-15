@@ -68,7 +68,17 @@ Cookie 明文只在本次调用链中短暂存在。
 func (s *Scheduler) saveRenewedCookies(ctx context.Context, cookieID, cookieStr, metadata string) bool {
 	// 续期响应不经过 MTOP 签名流程，产出不含 _m_h5_tk 的 Cookie 属预期；但它会整体覆盖
 	// 数据库凭证，使依赖该凭证的定时任务失去签名能力。此处只在缺失时告警，据此定位来源。
-	if !mtop.SignTokenPresent(cookieStr) {
+	// 库中凭证已带令牌时整体覆盖会把账号降级为无签名能力（定时任务报错、重连后必须重新登录），
+	// 因此这里拒绝降级写回，保留库中更完整的凭证，由后续 MTOP 调用自行重签令牌。
+	// 空值代表服务端显式删除或登出，不属于降级，必须照常写回。
+	if strings.TrimSpace(cookieStr) != "" && !mtop.SignTokenPresent(cookieStr) {
+		// current、readErr 是库中现有凭证明文与读取错误；读取失败时保留原行为并仅告警。
+		current, readErr := s.store.Cookies.GetValue(ctx, cookieID)
+		if readErr == nil && mtop.SignTokenPresent(current) {
+			s.logger.Error("续期 Cookie 缺少签名令牌且库中已有令牌，拒绝降级写回",
+				"account", cookieID, "source", "renewal")
+			return false
+		}
 		s.logger.Warn("续期写入的 Cookie 不含 MTOP 签名令牌", "account", cookieID, "source", "renewal")
 	}
 	if // err 用于本次流程后续判断的err

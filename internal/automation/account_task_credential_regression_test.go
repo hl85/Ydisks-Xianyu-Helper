@@ -82,7 +82,11 @@ func TestTaskCookieUnlocksBeforeRuntimeNotification(t *testing.T) {
 	go func() {
 		// index、value 是同一任务内的两次值更新、一次仅属性变化及一次相同快照重放；重放不能重复通知运行时。
 		for index, value := range []string{"first_test", "second_test", "second_test", "second_test"} {
-			credential.cookieSession.ReplaceSnapshot([]cookierefresh.BrowserCookie{{Name: "unb", Value: value, Domain: ".goofish.com", Path: "/", HTTPOnly: index >= 2}})
+			// 快照同时保留签名令牌：缺令牌的写回会被降级保护拒绝，与本用例验证的锁释放顺序无关。
+			credential.cookieSession.ReplaceSnapshot([]cookierefresh.BrowserCookie{
+				{Name: "unb", Value: value, Domain: ".goofish.com", Path: "/", HTTPOnly: index >= 2},
+				{Name: "_m_h5_tk", Value: "test_sign_token", Domain: ".goofish.com", Path: "/"},
+			})
 			// updated、saveErr 保存写回值及失败原因；下次写回必须以本次已提交版本为基准。
 			updated, saveErr := coordinator.persistTaskCookieSession(ctx, "cid", credential.cookieValue, "", &credential)
 			if saveErr != nil {
