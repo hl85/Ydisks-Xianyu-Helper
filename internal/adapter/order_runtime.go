@@ -336,6 +336,10 @@ func (r *OrderRuntime) FetchSoldOrders(ctx context.Context, detail *orderapp.Pla
 			}
 			orders = append(orders, orderapp.RefreshSoldOrder{OrderID: remote.OrderID, ItemID: remote.ItemID, BuyerID: remote.BuyerID, CreatedAt: remote.CreatedAt, OrderStatus: orderapp.NormalizeOrderStatus(remote.OrderStatus), Quantity: remote.Quantity, Amount: remote.Amount, ReceiverName: remote.ReceiverName, ReceiverPhone: remote.ReceiverPhone, ReceiverAddr: remote.ReceiverAddr, ReceiverCity: remote.ReceiverCity, IsBargain: remote.IsBargain})
 		}
+		// 发现待刀成订单（SKIP_PIN 按钮在场）时立即按名单触发自动免拼。
+		// 失败只记日志不阻断同步：下一轮订单同步按钮仍在场会自然重试；
+		// 免拼成功后平台回写「已成功小刀，待发货」，既有 order_paid 链路随即自动发货。
+		r.triggerSkipPinForBargains(requestCtx, detail.ID, page.Items)
 		if !page.NextPage {
 			if !identityComplete {
 				sellerID = ""
@@ -347,6 +351,66 @@ func (r *OrderRuntime) FetchSoldOrders(ctx context.Context, detail *orderapp.Pla
 		}
 	}
 	return orderapp.RefreshSoldFetchResult{Orders: orders, CookieUpdate: orderCookieUpdate(detail, session)}, fmt.Errorf("订单列表达到 %d 页上限但 nextPage 为真，分页不完整", orderRuntimeMaxSoldOrderPages)
+}
+
+// triggerSkipPinForBargains 对名单内商品的待刀成订单调用「直接免拼」接口。
+//
+// 触发条件三重与：订单列表响应带 SKIP_PIN 按钮（平台确认该单处于待刀成）、
+// 商品在小刀免拼名单内（卖家主动登记）、账号任务仓储可用。
+// 免拼接口幂等：重复调用对已免拼订单无副作用，因此本方法不做额外去重——
+// 触发成功后按钮随订单状态消失，天然不会再触发；失败则等下一轮同步自然重试。
+// ctx 携带订单同步的 Cookie 会话：免拼响应轮换的签名令牌会被同一会话吸收，
+// 并随订单同步收尾的 Cookie 更新一并持久化。
+func (r *OrderRuntime) triggerSkipPinForBargains(ctx context.Context, cookieID string, items []mtop.SoldOrder) {
+	if r == nil || r.store == nil || r.store.SkipPinItems == nil {
+		return
+	}
+	// impl 是支持免拼调用的具体客户端；接口抽象不含免拼时静默跳过。
+	impl, ok := r.mtopClient().(*mtop.ClientImpl)
+	if !ok || impl == nil {
+		return
+	}
+	// enabled 是当前账号已启用自动免拼的商品集合。
+	enabled, err := r.store.SkipPinItems.ListEnabledItems(ctx, cookieID)
+	if err != nil {
+		r.logger.Warn("读取小刀免拼名单失败", "account", cookieID, "err", err)
+		return
+	}
+	if len(enabled) == 0 {
+		return
+	}
+	// pendingBargains 收集本页处于待刀成状态且商品在名单内的订单。
+	pendingBargains := make([]mtop.SoldOrder, 0, 1)
+	// item 表示当前遍历过程中的平台订单条目。
+	for _, item := range items {
+		if !item.IsBargain {
+			continue
+		}
+		// listed 表示该商品是否在自动免拼名单内。
+		if _, listed := enabled[item.ItemID]; !listed {
+			continue
+		}
+		pendingBargains = append(pendingBargains, item)
+	}
+	// session 取同步会话的 Cookie 会话；缺失签名令牌时按空回退由实现内部处理。
+	session := mtop.CookieSessionFromContext(ctx)
+	// sessionCookies 保存同步会话当前 Cookie（含最新签名令牌）。
+	sessionCookies := ""
+	if session != nil {
+		sessionCookies, _, _ = session.State()
+	}
+	// bargain 表示当前遍历过程中的待刀成订单。
+	for _, bargain := range pendingBargains {
+		// ok、ret、skipErr 是免拼调用的业务结果、平台返回与错误。
+		ok, ret, _, skipErr := impl.SkipPinFreeShippingContext(ctx, sessionCookies, bargain.OrderID, bargain.ItemID, bargain.BuyerID)
+		if skipErr != nil || !ok {
+			r.logger.Warn("自动免拼失败，等待下一轮订单同步重试",
+				"account", cookieID, "order", bargain.OrderID, "item", bargain.ItemID, "ret", ret, "err", skipErr)
+			continue
+		}
+		r.logger.Info("自动免拼成功，等待平台回写后由既有链路自动发货",
+			"account", cookieID, "order", bargain.OrderID, "item", bargain.ItemID, "buyer", bargain.BuyerID)
+	}
 }
 
 // RefreshChatConversations 按需刷新订单同步所需的聊天联系人缓存。
