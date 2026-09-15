@@ -508,6 +508,11 @@ func (c *credentialCoordinator) persistRenewFlatCookie(ctx context.Context, newC
 	// 没有权威 Jar 时，接口 Set-Cookie 只能更新兼容扁平值。不能把
 	// Domain/Path/HttpOnly/PartitionKey 均未知的 Cookie 伪造成完整快照。
 	metadata = cookierefresh.MetadataWithoutSnapshot(metadata)
+	// 接口续期结果通常不含 MTOP 签名令牌，但它会覆盖数据库凭证；缺失时记录来源，
+	// 便于把「账号任务失去签名能力」精确定位到具体写回路径。
+	if !mtop.SignTokenPresent(newCookies) {
+		a.logger.Warn("接口续期写入的 Cookie 不含 MTOP 签名令牌", "account", a.CookieID, "source", "engine-renew")
+	}
 	return a.store.Cookies.UpdateRenewalCookie(ctx, a.CookieID, newCookies, metadata, time.Now().Unix())
 }
 
