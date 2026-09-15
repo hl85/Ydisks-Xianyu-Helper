@@ -712,6 +712,49 @@ func isEstablishedNetworkError(err error) bool {
 	return false
 }
 
+// recordNetworkFailure 递增网络断线计数，驱动 networkRetryDelay 的退避阶梯。
+func (a *Account) recordNetworkFailure() {
+	a.runtimeMu.Lock()
+	a.networkFailures++
+	a.runtimeMu.Unlock()
+}
+
+// isTransientDialError 判断 WebSocket 拨号（握手）阶段的错误是否为与登录凭证无关的瞬时网络故障。
+//
+// 背景：握手失败的默认处理是「视为凭证失效 → 终止账号运行并提示重新登录」，这符合官网
+// /im 页面在 CONN_ERROR 后展示重新登录入口的行为。但拨号阶段的错误里混有大量与凭证无关的
+// 瞬时故障（DNS 解析失败、连接被拒、网络不可达、拨号超时、TLS 握手超时）。把它们一并当作
+// 凭证失效，会让一次秒级的 DNS 抖动演变成账号永久停摆：连接循环退出后没有任何组件会重新拉起。
+//
+// 判定顺序：服务端明确拒绝的认证类错误优先排除，避免把真正的凭证问题降级为可重试错误。
+func isTransientDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 认证类错误是服务端明确拒绝，必须走重新登录，不参与重试。
+	if ws.IsInvalidTokenError(err) || ws.IsAuthenticationError(err) || ws.IsConnectLimitError(err) {
+		return false
+	}
+	// msg 是归一化后的错误文本，仅用于匹配传输层故障标识。
+	msg := strings.ToLower(err.Error())
+	// marker 表示当前遍历过程中的传输层瞬时故障标识。
+	for _, marker := range []string{
+		// DNS：Docker 内置解析器故障与解析不到主机。
+		"server misbehaving", "no such host", "name resolution",
+		// 网络层：不可达、被拒、被重置。
+		"network is unreachable", "connection refused", "connection reset",
+		// 超时：拨号、读写、TLS 握手。
+		"i/o timeout", "dial tcp", "tls handshake timeout",
+		// 握手报文阶段中断。
+		"failed to send handshake request", "unexpected eof", " eof", "timeout",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // recordShortDisconnect 封装recordShortDisconnect业务协调。
 func (a *Account) recordShortDisconnect(connectedDuration time.Duration) bool {
 	a.runtimeMu.Lock()
