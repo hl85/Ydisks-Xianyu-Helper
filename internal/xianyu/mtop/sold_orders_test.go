@@ -258,9 +258,16 @@ func TestNormalizeSoldOrderTimeSupportsPlatformFormats(t *testing.T) {
 }
 
 // TestFetchSoldOrdersPageRejectsMissingTokenAndFailure 封装TestFetchSold订单列表页码RejectsMissing令牌AndFailure业务协调。
+// 缺少签名令牌会先尝试向令牌接口补齐；补齐失败时必须仍然报出缺令牌原因，不能被静默吞掉。
 func TestFetchSoldOrdersPageRejectsMissingTokenAndFailure(t *testing.T) {
+	// tokenServer 模拟令牌接口：返回不可重试的失败，使补齐立刻失败，测试保持快速。
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ret":["FAIL_SYS_ILLEGAL_ACCESS::非法请求"]}`)
+	}))
+	defer tokenServer.Close()
 	// client 用于本次流程后续判断的client
-	client := &ClientImpl{}
+	client := &ClientImpl{HTTPClient: tokenServer.Client(), TokenURL: tokenServer.URL}
 	if // err 用于本次流程后续判断的err
 	_, err := client.FetchSoldOrdersPage(context.Background(), "unb=1", 1, 30); err == nil || !strings.Contains(err.Error(), "_m_h5_tk") {
 		t.Fatalf("err=%v", err)

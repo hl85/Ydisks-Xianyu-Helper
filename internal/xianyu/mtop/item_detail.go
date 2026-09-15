@@ -67,7 +67,8 @@ func (c *ClientImpl) fetchItemDetail(ctx context.Context, cookies, itemID string
 		if err == nil {
 			return detail, nil
 		}
-		if !IsMTopTokenExpiredErr(err) {
+		// 缺少签名令牌与令牌过期同属「刷新令牌即可继续」的前置条件，需进入下方刷新分支。
+		if !IsMTopTokenExpiredErr(err) && !IsMissingSignTokenErr(err) {
 			return nil, err
 		}
 		if // session 用于读取响应刚吸收的最新 Cookie。
@@ -81,7 +82,8 @@ func (c *ClientImpl) fetchItemDetail(ctx context.Context, cookies, itemID string
 			// refreshed、refreshErr 保存主动刷新 MTOP 签名 Token 的结果及错误。
 			refreshed, refreshErr := c.RefreshTokenContext(ctx, currentCookies)
 			if refreshErr != nil {
-				return nil, fmt.Errorf("商品详情 Token 过期且刷新失败: %w", refreshErr)
+				// 补齐失败时保留原始缺令牌原因，调用方与告警仍可按既有文本定位。
+				return nil, errors.Join(err, fmt.Errorf("商品详情 Token 补齐失败: %w", refreshErr))
 			}
 			currentCookies = refreshed.UpdatedCookies
 		}
@@ -111,7 +113,7 @@ func (c *ClientImpl) fetchItemDetailOnce(ctx context.Context, cookies, itemID st
 	// token 是从签名 Cookie 提取的敏感签名密钥，不得记录。
 	token := protocol.SignToken(signingCookies)
 	if token == "" {
-		return nil, fmt.Errorf("cookie 缺少 _m_h5_tk，无法获取商品详情")
+		return nil, fmt.Errorf("%w，无法获取商品详情", ErrMissingSignToken)
 	}
 	// dataVal 是只包含会话商品 ID 的平台请求体。
 	dataVal := `{"itemId":` + strconv.Quote(itemID) + `}`
