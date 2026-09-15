@@ -86,9 +86,8 @@ func (c *connectionCoordinator) run(parent context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			a.logger.Error("WS 握手失败", "err", err)
-			// retryErr 保存握手失败处理后的终止错误；非 nil 时连接循环必须退出。
-			if retryErr := a.handleWSConnectFailure(ctx, err); retryErr != nil {
+			// 瞬时网络故障退避重连，认证类错误才终止账号。
+			if retryErr := c.handleConnectFailure(ctx, "握手", err); retryErr != nil {
 				return retryErr
 			}
 			continue
@@ -138,9 +137,8 @@ func (c *connectionCoordinator) run(parent context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			a.logger.Error("WS 注册失败", "err", err)
-			// retryErr 保存注册失败处理后的终止错误；非 nil 时连接循环必须退出。
-			if retryErr := a.handleWSConnectFailure(ctx, err); retryErr != nil {
+			// 瞬时网络故障退避重连，服务端拒绝才终止账号。
+			if retryErr := c.handleConnectFailure(ctx, "注册", err); retryErr != nil {
 				return retryErr
 			}
 			continue
@@ -239,6 +237,31 @@ func (c *connectionCoordinator) prepareRun(ctx context.Context, cancel context.C
 		}
 	}
 	return true, nil
+}
+
+// handleConnectFailure 统一处理 WebSocket 握手与注册阶段的失败，决定连接循环是重试还是终止账号。
+//
+// 返回 nil 表示调用方应进入下一轮连接；非 nil 表示账号必须停止运行，保留原 Run 的错误语义。
+//
+// 关键分流：拨号阶段的瞬时网络故障（DNS 抖动、连接被拒、网络不可达、拨号超时等）与登录凭证无关，
+// 退避后重连即可自愈。若与认证失败同样处理，任何一次秒级 DNS 抖动都会让账号永久停摆——连接循环
+// 退出后没有任何组件负责重新拉起，只能靠人工重启进程（2026-09-15 实测事故，停摆 1 小时 40 分钟）。
+func (c *connectionCoordinator) handleConnectFailure(ctx context.Context, stage string, err error) error {
+	// a 是当前连接协调器绑定的账号 facade。
+	a := c.account
+	a.logger.Error("WS "+stage+"失败", "err", err)
+	if !isTransientDialError(err) {
+		// 认证类错误保持原语义：交回调用方终止账号运行并提示重新登录。
+		return a.handleWSConnectFailure(ctx, err)
+	}
+	a.recordNetworkFailure()
+	a.clearConnectionToken(ctx)
+	// delay 是本次重连前的退避时长，已含抖动。
+	delay := a.networkRetryDelay()
+	a.setRuntimeState(RuntimeReconnecting, "网络暂不可用，正在退避重连")
+	a.logger.Warn("WS "+stage+"遇到瞬时网络故障，退避后重连", "err", err, "delay", delay.Round(time.Second))
+	// 退避等待可被取消；等待正常结束返回 nil，调用方随即重试连接。
+	return sleepCtx(ctx, delay)
 }
 
 // markConnectionOnline 原子记录新连接并发布恢复事件，避免连接循环混入状态收口细节。
