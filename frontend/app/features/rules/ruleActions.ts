@@ -369,7 +369,7 @@ export const useRuleActions = ({
     if (!editingAutomationRule.cookie_id) return alert('请选择账号');
     // variants 保存当前规格列表。
     const variants = editingAutomationRule.variants?.length ? editingAutomationRule.variants : [];
-    if (trigger !== 'review_missing_timeout' && trigger !== 'order_created') {
+    if (trigger !== 'review_missing_timeout' && trigger !== 'order_created' && trigger !== 'order_pin_pending') {
       if (!variants.length || variants.some(/* 当前回调校验卡密组或模板是否已选择。 */ variant => variant.delivery_mode === 'template' ? !variant.delivery_template_id : !variant.card_id)) return alert('请选择发货卡密库存或发货模板');
       if (variants.some(/* 当前回调校验模板变量是否绑定完整。 */ variant => {
         if (variant.delivery_mode !== 'template') return false;
@@ -398,7 +398,7 @@ export const useRuleActions = ({
       saveActions = saveActions.filter(/* 当前回调剔除空文案的可选提醒动作。 */ action => action.action_type !== 'send_text' || Boolean(action.message_template?.trim()));
     }
     // saveVariants 保存归一化后的发货规格。
-    const saveVariants = trigger === 'review_missing_timeout' || trigger === 'order_created' ? [] : variants.map(/* 当前回调归一化发货规格字段。 */ variant => ({ ...variant, spec_name: isMultiSpecRule ? variant.spec_name.trim() : '', spec_value: isMultiSpecRule ? variant.spec_value.trim() : '', delivery_count: Math.max(1, Number(variant.delivery_count) || 1), enabled: variant.enabled !== false }));
+    const saveVariants = trigger === 'review_missing_timeout' || trigger === 'order_created' || trigger === 'order_pin_pending' ? [] : variants.map(/* 当前回调归一化发货规格字段。 */ variant => ({ ...variant, spec_name: isMultiSpecRule ? variant.spec_name.trim() : '', spec_value: isMultiSpecRule ? variant.spec_value.trim() : '', delivery_count: Math.max(1, Number(variant.delivery_count) || 1), enabled: variant.enabled !== false }));
     setAutomationSubmitState(startRuleSubmission(automationSubmitState));
     // succeeded 记录保存是否成功。
     let succeeded = false;
