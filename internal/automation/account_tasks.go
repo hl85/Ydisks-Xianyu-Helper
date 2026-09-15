@@ -678,9 +678,16 @@ func (c *accountTaskCoordinator) persistTaskCredentialLocked(ctx context.Context
 	if value == data.Value && metadata == data.MetadataJSON {
 		return data.Value, nil
 	}
-	// 账号任务写回的是本轮会话的 Cookie；缺失签名令牌说明本会话未吸收到令牌，
-	// 记录来源便于区分是任务自身还是其他写回路径造成了覆盖。
-	if !mtop.SignTokenPresent(value) {
+	// 账号任务写回的是本轮会话的 Cookie；缺失签名令牌说明本会话未吸收到令牌。
+	// 库中凭证已带令牌时整体覆盖会把账号降级为无签名能力（定时任务报错、重连后必须重新登录），
+	// 因此此处直接拒绝降级写回，保留库中更完整的凭证，由后续 MTOP 调用自行重签令牌。
+	// 空值代表服务端显式删除或登出，不属于降级，必须照常写回。
+	if strings.TrimSpace(value) != "" && !mtop.SignTokenPresent(value) {
+		if mtop.SignTokenPresent(data.Value) {
+			c.logger.Warn("账号任务 Cookie 缺少签名令牌且库中已有令牌，拒绝降级写回",
+				"account", accountID, "source", "account-task")
+			return oldValue, errors.New("账号任务响应 Cookie 缺少签名令牌，已拒绝降级写回，保留库中已有令牌")
+		}
 		c.logger.Warn("账号任务写回的 Cookie 不含 MTOP 签名令牌", "account", accountID, "source", "account-task")
 	}
 	// writer、ok 区分生产完整凭证仓储与旧测试仓储，二者都在相同版本校验后写回。
