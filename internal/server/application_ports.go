@@ -18,15 +18,27 @@ import (
 	notificationsapp "xianyu-go/internal/application/notifications"
 	orderapp "xianyu-go/internal/application/orders"
 	settingsapp "xianyu-go/internal/application/settings"
-
-	"xianyu-go/internal/db"
 )
 
+// SkipPinSetting 是名单条目在 HTTP 层的投影。
+type SkipPinSetting struct {
+	// CookieID 是账号主键（cookies.id）。
+	CookieID string
+	// ItemID 是闲鱼商品 ID。
+	ItemID string
+	// Enabled 表示该商品当前是否启用自动免拼。
+	Enabled bool
+	// CreatedAt 是首次登记时间（Unix 秒）。
+	CreatedAt int64
+	// UpdatedAt 是最近一次变更时间（Unix 秒）。
+	UpdatedAt int64
+}
+
 // SkipPinSettingsPort 定义拼团小刀自动免拼商品名单 HTTP 接口所需的最小能力。
-// 由组合根注入 db.SkipPinItems 实现；server 层只消费本接口，不直接触碰 SQL。
+// 由组合根以适配器包装数据库名单仓储实现；server 层只消费本接口，不直接触碰 SQL。
 type SkipPinSettingsPort interface {
 	// List 返回某账号的全部名单条目（含停用），供界面展示。
-	List(ctx context.Context, cookieID string) ([]db.SkipPinItem, error)
+	List(ctx context.Context, cookieID string) ([]SkipPinSetting, error)
 	// Upsert 新增或更新一条名单（enabled 决定开关）。
 	Upsert(ctx context.Context, cookieID, itemID string, enabled bool) error
 	// Delete 移除一条名单；条目不存在视为已删除。

@@ -10,6 +10,7 @@ import (
 	orderapp "xianyu-go/internal/application/orders"
 	"xianyu-go/internal/auth"
 	composition "xianyu-go/internal/composition"
+	"xianyu-go/internal/db"
 	"xianyu-go/internal/server"
 )
 
@@ -189,6 +190,37 @@ type HTTPDependencies struct {
 	DatabaseHealth server.DatabaseHealthPort
 	// SkipPinSettings 是拼团小刀自动免拼名单的读写 Port。
 	SkipPinSettings server.SkipPinSettingsPort
+}
+
+// skipPinSettingsAdapter 把数据库名单仓储投影为 HTTP 层的名单端口，屏蔽 db 类型外泄。
+type skipPinSettingsAdapter struct {
+	// repo 是数据库层的名单仓储。
+	repo *db.SkipPinItems
+}
+
+// List 返回某账号的全部名单条目并转换为 HTTP 层投影。
+func (a skipPinSettingsAdapter) List(ctx context.Context, cookieID string) ([]server.SkipPinSetting, error) {
+	// items、err 是数据库名单条目与读取错误。
+	items, err := a.repo.List(ctx, cookieID)
+	if err != nil {
+		return nil, err
+	}
+	// out 是转换后的 HTTP 层条目。
+	out := make([]server.SkipPinSetting, 0, len(items))
+	for _, item := range items {
+		out = append(out, server.SkipPinSetting{CookieID: item.CookieID, ItemID: item.ItemID, Enabled: item.Enabled, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt})
+	}
+	return out, nil
+}
+
+// Upsert 新增或更新一条名单。
+func (a skipPinSettingsAdapter) Upsert(ctx context.Context, cookieID, itemID string, enabled bool) error {
+	return a.repo.Upsert(ctx, cookieID, itemID, enabled)
+}
+
+// Delete 移除一条名单。
+func (a skipPinSettingsAdapter) Delete(ctx context.Context, cookieID, itemID string) error {
+	return a.repo.Delete(ctx, cookieID, itemID)
 }
 
 // ServerDependencies 将组合层服务投影为 HTTP Server 需要的不可变最小 Port 快照。

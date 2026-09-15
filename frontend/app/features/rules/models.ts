@@ -166,9 +166,9 @@ export interface Item {
 }
 
 /** 由当前 feature adapter 归一后的 AutomationTriggerType UI 模型；不直接暴露 HTTP DTO。 */
-export type AutomationTriggerType = 'order_created' | 'order_paid' | 'buyer_reviewed' | 'review_missing_timeout';
+export type AutomationTriggerType = 'order_created' | 'order_paid' | 'buyer_reviewed' | 'review_missing_timeout' | 'order_pin_pending';
 /** 由当前 feature adapter 归一后的 AutomationActionType UI 模型；不直接暴露 HTTP DTO。 */
-export type AutomationActionType = 'confirm_shipment' | 'send_card' | 'send_template' | 'send_text' | 'adjust_price';
+export type AutomationActionType = 'confirm_shipment' | 'send_card' | 'send_template' | 'send_text' | 'adjust_price' | 'skip_pin';
 
 /** 发货模板中的一条顺序消息。 */
 export interface DeliveryTemplateMessage {

@@ -10,6 +10,7 @@ import (
 
 	accountmanager "xianyu-go/internal/account"
 	orderapp "xianyu-go/internal/application/orders"
+	"xianyu-go/internal/automation"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/xianyu/cookierefresh"
 	"xianyu-go/internal/xianyu/mtop"
@@ -19,6 +20,8 @@ import (
 type OrderAutomation interface {
 	// ManualFullDelivery 执行一次订单完整发货并返回实际发送数量。
 	ManualFullDelivery(context.Context, *db.Order) (int, error)
+	// HandleTask 把系统事件交给自动化中心，由自动化规则匹配并执行动作。
+	HandleTask(context.Context, automation.Task) error
 }
 
 // OrderNotifier 定义订单发货结果所需的最小通知能力，通知实现不进入订单应用层。
@@ -43,6 +46,8 @@ type OrderRuntimeHooks struct {
 	AccountRunning func(string) bool
 	// AutomationReady 判断完整发货自动化依赖是否可用。
 	AutomationReady func() bool
+	// Automation 提供把系统事件交给自动化中心匹配规则的能力；未装配时为 nil。
+	Automation OrderAutomation
 	// ManualFullDelivery 执行完整自动化发货；订单模型转换由装配回调负责。
 	ManualFullDelivery func(context.Context, *orderapp.Order) (int, error)
 	// UpdateRunningCookie 同步平台响应中的最新 Cookie 到账号运行实例。
@@ -64,6 +69,7 @@ func NewOrderRuntimeHooks(client func() mtop.Client, manager *accountmanager.Man
 		ClientAvailable: func() bool { return client != nil && client() != nil },
 		AccountRunning:  AccountRunningLookup(manager),
 		AutomationReady: func() bool { return manager != nil && automation != nil },
+		Automation:      automation,
 		ManualFullDelivery: func(ctx context.Context, order *orderapp.Order) (int, error) {
 			if automation == nil {
 				return 0, errors.New("自动化中心未初始化")
@@ -353,63 +359,44 @@ func (r *OrderRuntime) FetchSoldOrders(ctx context.Context, detail *orderapp.Pla
 	return orderapp.RefreshSoldFetchResult{Orders: orders, CookieUpdate: orderCookieUpdate(detail, session)}, fmt.Errorf("订单列表达到 %d 页上限但 nextPage 为真，分页不完整", orderRuntimeMaxSoldOrderPages)
 }
 
-// triggerSkipPinForBargains 对名单内商品的待刀成订单调用「直接免拼」接口。
+// triggerSkipPinForBargains 对处于待刀成状态（SKIP_PIN 按钮在场）的订单发出
+// order_pin_pending 自动化事件，由自动化规则匹配决定是否执行「直接免拼」动作。
 //
-// 触发条件三重与：订单列表响应带 SKIP_PIN 按钮（平台确认该单处于待刀成）、
-// 商品在小刀免拼名单内（卖家主动登记）、账号任务仓储可用。
-// 免拼接口幂等：重复调用对已免拼订单无副作用，因此本方法不做额外去重——
-// 触发成功后按钮随订单状态消失，天然不会再触发；失败则等下一轮同步自然重试。
-// ctx 携带订单同步的 Cookie 会话：免拼响应轮换的签名令牌会被同一会话吸收，
-// 并随订单同步收尾的 Cookie 更新一并持久化。
+// 规则匹配天然支持两种范围：按商品登记（item_id 精确匹配）或账号全局规则
+// （不限定商品；商品不支持拼单时平台不会出现待刀成订单，事件自然不会产生，无兼容问题）。
+// 免拼接口幂等且事件处理失败只记日志：下一轮订单同步按钮仍在场会再次发事件，自然重试；
+// 免拼成功后平台回写「已成功小刀，待发货」，既有 order_paid 链路随即自动发货。
 func (r *OrderRuntime) triggerSkipPinForBargains(ctx context.Context, cookieID string, items []mtop.SoldOrder) {
-	if r == nil || r.store == nil || r.store.SkipPinItems == nil {
+	if r == nil || r.hooks.Automation == nil {
 		return
 	}
-	// impl 是支持免拼调用的具体客户端；接口抽象不含免拼时静默跳过。
-	impl, ok := r.mtopClient().(*mtop.ClientImpl)
-	if !ok || impl == nil {
-		return
-	}
-	// enabled 是当前账号已启用自动免拼的商品集合。
-	enabled, err := r.store.SkipPinItems.ListEnabledItems(ctx, cookieID)
-	if err != nil {
-		r.logger.Warn("读取小刀免拼名单失败", "account", cookieID, "err", err)
-		return
-	}
-	if len(enabled) == 0 {
-		return
-	}
-	// pendingBargains 收集本页处于待刀成状态且商品在名单内的订单。
+	// pendingBargains 收集本页处于待刀成状态（SKIP_PIN 按钮在场）的订单。
 	pendingBargains := make([]mtop.SoldOrder, 0, 1)
 	// item 表示当前遍历过程中的平台订单条目。
 	for _, item := range items {
-		if !item.IsBargain {
-			continue
+		if item.IsBargain {
+			pendingBargains = append(pendingBargains, item)
 		}
-		// listed 表示该商品是否在自动免拼名单内。
-		if _, listed := enabled[item.ItemID]; !listed {
-			continue
-		}
-		pendingBargains = append(pendingBargains, item)
-	}
-	// session 取同步会话的 Cookie 会话；缺失签名令牌时按空回退由实现内部处理。
-	session := mtop.CookieSessionFromContext(ctx)
-	// sessionCookies 保存同步会话当前 Cookie（含最新签名令牌）。
-	sessionCookies := ""
-	if session != nil {
-		sessionCookies, _, _ = session.State()
 	}
 	// bargain 表示当前遍历过程中的待刀成订单。
 	for _, bargain := range pendingBargains {
-		// ok、ret、skipErr 是免拼调用的业务结果、平台返回与错误。
-		ok, ret, _, skipErr := impl.SkipPinFreeShippingContext(ctx, sessionCookies, bargain.OrderID, bargain.ItemID, bargain.BuyerID)
-		if skipErr != nil || !ok {
-			r.logger.Warn("自动免拼失败，等待下一轮订单同步重试",
-				"account", cookieID, "order", bargain.OrderID, "item", bargain.ItemID, "ret", ret, "err", skipErr)
+		// task 是交给自动化中心匹配规则的事件事实；凭证由动作执行器经仓储自取。
+		task := automation.Task{
+			Source:      "ordersync",
+			AccountID:   cookieID,
+			TriggerType: automation.TriggerOrderPinPending,
+			OrderID:     bargain.OrderID,
+			ItemID:      bargain.ItemID,
+			BuyerID:     bargain.BuyerID,
+			OrderStatus: bargain.PlatformStatus,
+		}
+		// err 是事件交付失败原因。
+		if err := r.hooks.Automation.HandleTask(ctx, task); err != nil {
+			r.logger.Warn("小刀待刀成事件处理失败，等待下一轮订单同步重试",
+				"account", cookieID, "order", bargain.OrderID, "item", bargain.ItemID, "err", err)
 			continue
 		}
-		r.logger.Info("自动免拼成功，等待平台回写后由既有链路自动发货",
-			"account", cookieID, "order", bargain.OrderID, "item", bargain.ItemID, "buyer", bargain.BuyerID)
+		r.logger.Info("小刀待刀成事件已交付自动化中心", "account", cookieID, "order", bargain.OrderID, "item", bargain.ItemID)
 	}
 }
 

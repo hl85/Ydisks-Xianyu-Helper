@@ -975,4 +975,8 @@ func TestOpenAPILocalResourceMutationResponses(t *testing.T) {
 	serveOpenAPISuccess(t, handler, finalCookie, http.MethodPost, "/api/v1/reply-rules/acc1", `{"keyword":"索引关键字","reply":"索引回复"}`)
 	serveOpenAPISuccess(t, handler, finalCookie, http.MethodDelete, "/api/v1/reply-rules/acc1/index/0", "")
 	serveOpenAPISuccess(t, handler, finalCookie, http.MethodPut, "/api/v1/account-tasks/acc1", `{"auto_rate_enabled":true,"rate_content":"服务很好","auto_polish_enabled":false,"polish_time":"03:00"}`)
+	// 小刀免拼名单三连：登记、读取、移除，覆盖 order_pin_pending 触发器的管理契约。
+	serveOpenAPISuccess(t, handler, finalCookie, http.MethodPut, "/api/v1/accounts/acc1/skip-pin", `{"item_id":"1081546685209","enabled":true}`)
+	serveOpenAPISuccess(t, handler, finalCookie, http.MethodGet, "/api/v1/accounts/acc1/skip-pin", "")
+	serveOpenAPISuccess(t, handler, finalCookie, http.MethodDelete, "/api/v1/accounts/acc1/skip-pin/1081546685209", "")
 }

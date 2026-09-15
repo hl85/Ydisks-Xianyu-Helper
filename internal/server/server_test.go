@@ -100,7 +100,7 @@ func newTestServer(t *testing.T) (*Server, *db.Store, func()) { // newTestServer
 	// authentication 保存测试 HTTP 会话中间件需要的认证服务。
 	authentication := &auth.Service{Store: store}
 	// srv、err 保存测试 HTTP 服务构造结果及失败原因。
-	srv, err := newTestServerFromComposition(authentication, mgr, nil, nil, nil, orderDependencies, accountDependencies, itemDependencies, chatDependencies, automationDependencies, transportApplications, platformDependencies, databaseHealth, orderReconciliationRecovery)
+	srv, err := newTestServerFromComposition(authentication, mgr, nil, nil, nil, orderDependencies, accountDependencies, itemDependencies, chatDependencies, automationDependencies, transportApplications, platformDependencies, databaseHealth, orderReconciliationRecovery, store)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -207,7 +207,7 @@ func newUninitializedTestServer(t *testing.T) (*Server, *db.Store, func()) {
 	// authentication 保存未初始化数据库上的会话中间件依赖。
 	authentication := &auth.Service{Store: store}
 	// srv、err 保存未初始化测试服务构造结果及失败原因。
-	srv, err := newTestServerFromComposition(authentication, mgr, nil, nil, nil, orderDependencies, accountDependencies, itemDependencies, chatDependencies, automationDependencies, transportApplications, platformDependencies, databaseHealth, orderReconciliationRecovery)
+	srv, err := newTestServerFromComposition(authentication, mgr, nil, nil, nil, orderDependencies, accountDependencies, itemDependencies, chatDependencies, automationDependencies, transportApplications, platformDependencies, databaseHealth, orderReconciliationRecovery, store)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -218,7 +218,7 @@ func newUninitializedTestServer(t *testing.T) (*Server, *db.Store, func()) {
 }
 
 // newTestServerFromComposition 按生产组合根顺序构造测试 HTTP Server，禁止回退到已删除的 Server 内部装配器。
-func newTestServerFromComposition(authentication *auth.Service, manager *account.Manager, autoCenter *automation.Center, notifier *notify.Notifier, chatService *chat.Service, orderDependencies *adapter.OrderDependencies, accountDependencies *adapter.AccountDependencies, itemDependencies *adapter.ItemDependencies, chatDependencies *adapter.ChatDependencies, automationDependencies *adapter.AutomationDependencies, transportApplications *adapter.TransportApplicationServices, platformDependencies *adapter.PlatformDependencies, databaseHealth DatabaseHealthPort, orderReconciliationRecovery *orderapp.ReconciliationRecoveryCoordinator) (*Server, error) {
+func newTestServerFromComposition(authentication *auth.Service, manager *account.Manager, autoCenter *automation.Center, notifier *notify.Notifier, chatService *chat.Service, orderDependencies *adapter.OrderDependencies, accountDependencies *adapter.AccountDependencies, itemDependencies *adapter.ItemDependencies, chatDependencies *adapter.ChatDependencies, automationDependencies *adapter.AutomationDependencies, transportApplications *adapter.TransportApplicationServices, platformDependencies *adapter.PlatformDependencies, databaseHealth DatabaseHealthPort, orderReconciliationRecovery *orderapp.ReconciliationRecoveryCoordinator, store *db.Store) (*Server, error) {
 	// testPlatform 将默认平台能力包装为每个 Server 独立可变的测试 Port。
 	testPlatform := newTestPlatformPort(platformDependencies)
 	// lifecycleCoordinator 保存测试应用 worker 的父 Context 所有者。
@@ -260,7 +260,7 @@ func newTestServerFromComposition(authentication *auth.Service, manager *account
 		return nil, applicationsErr
 	}
 	// dependencies 保存测试组合层投影出的 HTTP transport 依赖。
-	dependencies := testServerDependencies(authentication, databaseHealth, applications, sessionRecovery)
+	dependencies := testServerDependencies(authentication, databaseHealth, applications, sessionRecovery, store)
 	// serverErr 保存 HTTP transport 注入完整 Port 快照时的构造失败。
 	server, serverErr := New(dependencies)
 	if serverErr != nil {
@@ -354,8 +354,39 @@ func (adapter testSessionRecoveryAdapter) Recover(ctx context.Context, accountID
 	return adapter.handler != nil && adapter.handler(ctx, accountID, err)
 }
 
+// testSkipPinAdapter 把名单仓储投影为 HTTP 层的小刀免拼名单端口，供契约场景覆盖。
+type testSkipPinAdapter struct {
+	// store 是当前测试数据库的 repository 聚合入口。
+	store *db.Store
+}
+
+// List 返回某账号的全部名单条目并转换为 HTTP 层投影。
+func (a testSkipPinAdapter) List(ctx context.Context, cookieID string) ([]SkipPinSetting, error) {
+	// items、err 是名单条目与读取错误。
+	items, err := a.store.SkipPinItems.List(ctx, cookieID)
+	if err != nil {
+		return nil, err
+	}
+	// out 是转换后的 HTTP 层条目。
+	out := make([]SkipPinSetting, 0, len(items))
+	for _, item := range items {
+		out = append(out, SkipPinSetting{CookieID: item.CookieID, ItemID: item.ItemID, Enabled: item.Enabled, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt})
+	}
+	return out, nil
+}
+
+// Upsert 新增或更新一条名单。
+func (a testSkipPinAdapter) Upsert(ctx context.Context, cookieID, itemID string, enabled bool) error {
+	return a.store.SkipPinItems.Upsert(ctx, cookieID, itemID, enabled)
+}
+
+// Delete 移除一条名单。
+func (a testSkipPinAdapter) Delete(ctx context.Context, cookieID, itemID string) error {
+	return a.store.SkipPinItems.Delete(ctx, cookieID, itemID)
+}
+
 // testServerDependencies 将组合层服务快照转换为 Server 测试构造所需的依赖。
-func testServerDependencies(authentication *auth.Service, databaseHealth DatabaseHealthPort, services *composition.Services, sessionRecovery adapter.SessionRecoveryHandler) Dependencies {
+func testServerDependencies(authentication *auth.Service, databaseHealth DatabaseHealthPort, services *composition.Services, sessionRecovery adapter.SessionRecoveryHandler, store *db.Store) Dependencies {
 	// ports 是测试组合根投影的完整 transport Port 集合。
 	ports := services.TransportPorts()
 	return Dependencies{Auth: authentication, Addr: ":0", DatabaseHealth: databaseHealth, Applications: NewApplicationPorts(ApplicationPortsInput{
@@ -373,6 +404,7 @@ func testServerDependencies(authentication *auth.Service, databaseHealth Databas
 		DeliveryTemplates:      ports.DeliveryTemplates,
 		PublishAutomationRules: ports.PublishAutomationRules, DefaultReplies: ports.DefaultReplies, Keywords: ports.Keywords,
 		Settings: ports.Settings, Admin: ports.Admin,
+		SkipPinSettings: testSkipPinAdapter{store: store},
 	})}
 }
 

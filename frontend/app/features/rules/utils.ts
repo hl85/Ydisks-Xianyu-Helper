@@ -1,4 +1,4 @@
-import { CircleDollarSign,Clock3,Gift,PackageCheck } from 'lucide-react';
+import { CircleDollarSign,Clock3,Gift,PackageCheck,Sparkles } from 'lucide-react';
 import type {
 AccountDetail,
 AutomationAction,
@@ -27,6 +27,14 @@ export const triggerMeta: Record<AutomationTriggerType, TriggerMeta> = {
     accent: 'blue',
     icon: PackageCheck,
   },
+  order_pin_pending: {
+    label: '小刀单自动免拼',
+    shortLabel: '自动免拼',
+    description: '订单同步发现名单内商品的小刀单处于待刀成状态时，自动点「直接免拼」，随后由付款发货规则自动发货。',
+    flow: ['订单同步发现待刀成', '匹配商品/全局规则', '自动直接免拼', '自动发货'],
+    accent: 'blue',
+    icon: Sparkles,
+  },
   buyer_reviewed: {
     label: '评价后发送赠品',
     shortLabel: '评价赠品',
@@ -46,7 +54,7 @@ export const triggerMeta: Record<AutomationTriggerType, TriggerMeta> = {
 };
 
 // triggerOrder 固定自动化类型在创建面板和筛选器中的排序。
-export const triggerOrder: AutomationTriggerType[] = ['order_paid', 'order_created', 'buyer_reviewed', 'review_missing_timeout'];
+export const triggerOrder: AutomationTriggerType[] = ['order_paid', 'order_pin_pending', 'order_created', 'buyer_reviewed', 'review_missing_timeout'];
 
 // reviewRequestText 是超时未评价规则的默认提醒文案。
 export const reviewRequestText = '亲，商品使用满意的话，麻烦给个评价，谢谢～';
@@ -158,6 +166,13 @@ export const cardActionsForTrigger = (trigger: AutomationTriggerType, cardID = 0
       sort_order: 1,
     }];
   }
+  if (trigger === 'order_pin_pending') {
+    return [{
+      action_type: 'skip_pin',
+      enabled: true,
+      sort_order: 1,
+    }];
+  }
   if (trigger === 'review_missing_timeout') {
     return [{
       action_type: 'send_text',
@@ -188,6 +203,9 @@ export const actionSummary = (rule: ShippingRule) => {
     // target 是规则配置的改价目标价格。
     const target = adjustPriceTarget(rule.actions);
     return target ? `拍下后改价为 ¥${target}` : '未配置目标价格';
+  }
+  if (rule.trigger_type === 'order_pin_pending') {
+    return '自动直接免拼';
   }
   if (rule.trigger_type === 'review_missing_timeout') {
     return rule.actions?.find(
